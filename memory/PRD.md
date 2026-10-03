@@ -32,6 +32,17 @@ Myraana and never send a print command or claim physical production completed.
   PDF verification. The temporary database was deleted after the run.
 - PASS: backend health endpoint and first-run state on the preview URL.
 - PASS: production frontend build plus desktop and mobile browser entry proof.
+- PASS: 16-criterion isolated acceptance run. It covered browser job/proof flow,
+  approval persistence, GridFS lineage/checksum, PDF proof rendering, artwork
+  replacement invalidation, bleed/blocking/DPI behavior, duplicate requests,
+  connector replay/readiness/handoff, and human production gates.
+- PASS: independent regression test confirmed preview-proxy authentication returns
+  200 while a deliberately unrelated origin returns 403. The QA database was
+  dropped immediately after verification and the original backend environment was
+  restored.
+- PASS: sanitized source archive excludes `.env`, QA credentials, databases, and
+  credential literals. QA report and desktop/mobile proof screenshots are in
+  `/app/artifacts/`.
 - NOT VERIFIED: live connector/hardware, direct Anthropic/OpenAI credentials, and
   live custom-domain routing.
 - FAIL (honestly blocked): managed LLM tool-call probe returned a provider-side

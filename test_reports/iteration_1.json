@@ -1,0 +1,22 @@
+{
+  "summary": "Frontend-only regression for Print2Go origin fix. (1) Signed in via the preview URL with the disposable QA account; /api/auth/login returned 200 with user payload (role=admin). (2) Verified protected POST /api/auth/login with an unrelated Origin header returns 403 {\"error\":\"Request origin is not allowed.\"}. (3) Authenticated workspace rendered the pre-existing QA jobs list and the saved job 2E10E1A1 (QA Duplicate Process) opened to a fully populated production proof page (Front/Back previews, next-step card, progress 7/16) with no blank screen. No new users/jobs/files/connector activity were created.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "assert_origin() builds allowed set from CORS_ORIGINS + request.base_url + x-forwarded-host/proto + Host header. This correctly accepts the real preview proxy HTTPS host while rejecting unrelated origins (verified by 403 on evil-unrelated.example.com)."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "n/a (skipped)", "frontend": "100%"},
+  "test_credentials": "Used supplied disposable QA account only; not written to artifacts.",
+  "seed_data_creation": "None. Used only the pre-existing QA jobs in the isolated QA DB.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Preview is pointed at a disposable QA DB. Jobs present: QA Duplicate Process (2E10E1A1), QA Low DPI, QA Unsafe Text, QA Missing Bleed, QA Proof Customer. Login endpoint works; origin allowlist correctly accepts the preview proxy host and rejects unrelated origins with 403.",
+  "rca of the issue": "Prior failure 'Request origin is not allowed.' happened because assert_origin() only compared against CORS_ORIGINS env, which did not match the Kubernetes-ingress preview host seen in the Origin header. Fix now additionally adds request.base_url, x-forwarded-host (with x-forwarded-proto), and the raw Host header into the allowed set, so the real preview proxy HTTPS host is accepted; unrelated origins still fail the membership check and get a 403."
+}

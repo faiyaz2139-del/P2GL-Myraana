@@ -3,7 +3,7 @@
   "generatedAt": "2026-10-03T01:15:56Z",
   "results": [
     {
-      "criterion": "01 01 QA authentication and browser-created job",
+      "criterion": "01 QA authentication and browser-created job",
       "status": "PASS",
       "evidence": [
         {
@@ -15,7 +15,7 @@
       ]
     },
     {
-      "criterion": "02 02 Immutable ORIGINAL to PRINT_READY lineage",
+      "criterion": "02 Immutable ORIGINAL to PRINT_READY lineage",
       "status": "PASS",
       "evidence": [
         {
@@ -28,7 +28,7 @@
       ]
     },
     {
-      "criterion": "03 03 Exact PRINT_READY checksum",
+      "criterion": "03 Exact PRINT_READY checksum",
       "status": "PASS",
       "evidence": [
         {
@@ -38,7 +38,7 @@
       ]
     },
     {
-      "criterion": "04 04 Actual front/back proof render",
+      "criterion": "04 Actual front/back proof render",
       "status": "PASS",
       "evidence": [
         {
@@ -48,7 +48,7 @@
       ]
     },
     {
-      "criterion": "05 05 Browser approval, refresh, desktop and mobile proof",
+      "criterion": "05 Browser approval, refresh, desktop and mobile proof",
       "status": "PASS",
       "evidence": {
         "approvalBeforeRefresh": "browser flow reached route selection after exact-file approval",
@@ -58,7 +58,7 @@
       }
     },
     {
-      "criterion": "06 06 Route and RIP staging remain no-print actions",
+      "criterion": "06 Route and RIP staging remain no-print actions",
       "status": "PASS",
       "evidence": [
         {
@@ -73,28 +73,7 @@
       ]
     },
     {
-      "criterion": "07 07 Disconnected connector and premature physical claim are blocked",
-      "status": "PASS",
-      "evidence": [
-        {
-          "http": 409
-        },
-        {
-          "http": 409
-        }
-      ]
-    },
-    {
-      "criterion": "08 08 Writable connector heartbeat",
-      "status": "PASS",
-      "evidence": [
-        {
-          "http": 200
-        }
-      ]
-    },
-    {
-      "criterion": "09 09 Replay nonce and writable-capability rejection",
+      "criterion": "07 Disconnected connector and premature physical claim are blocked",
       "status": "PASS",
       "evidence": [
         {
@@ -106,7 +85,28 @@
       ]
     },
     {
-      "criterion": "10 10 Readiness and authorization gates",
+      "criterion": "08 Writable connector heartbeat",
+      "status": "PASS",
+      "evidence": [
+        {
+          "http": 200
+        }
+      ]
+    },
+    {
+      "criterion": "09 Replay nonce and writable-capability rejection",
+      "status": "PASS",
+      "evidence": [
+        {
+          "http": 409
+        },
+        {
+          "http": 409
+        }
+      ]
+    },
+    {
+      "criterion": "10 Readiness and authorization gates",
       "status": "PASS",
       "evidence": [
         {
@@ -118,7 +118,7 @@
       ]
     },
     {
-      "criterion": "11 11 Exact checksum handoff records output without print completion",
+      "criterion": "11 Exact checksum handoff records output without print completion",
       "status": "PASS",
       "evidence": [
         {
@@ -131,7 +131,7 @@
       ]
     },
     {
-      "criterion": "12 12 Replacement artwork revokes approval and authorization",
+      "criterion": "12 Replacement artwork revokes approval and authorization",
       "status": "PASS",
       "evidence": [
         {
@@ -142,7 +142,7 @@
       ]
     },
     {
-      "criterion": "13 13 Missing bleed requires an explicit decision",
+      "criterion": "13 Missing bleed requires an explicit decision",
       "status": "PASS",
       "evidence": [
         {
@@ -151,7 +151,7 @@
       ]
     },
     {
-      "criterion": "14 14 Unsafe artwork blocks processing",
+      "criterion": "14 Unsafe artwork blocks processing",
       "status": "PASS",
       "evidence": [
         {
@@ -160,7 +160,7 @@
       ]
     },
     {
-      "criterion": "15 15 Low-DPI warning is persisted",
+      "criterion": "15 Low-DPI warning is persisted",
       "status": "PASS",
       "evidence": [
         {
@@ -169,7 +169,7 @@
       ]
     },
     {
-      "criterion": "16 16 Duplicate requests preserve a single PRINT_READY lineage",
+      "criterion": "16 Duplicate requests preserve a single PRINT_READY lineage",
       "status": "PASS",
       "evidence": [
         {
