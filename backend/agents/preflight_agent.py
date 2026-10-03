@@ -21,7 +21,12 @@ class PreflightAgent(BaseAgent):
                 summary="Measured preflight has not completed.",
                 stop_reasons=["Preflight evidence is missing."],
             )
-        if pf.get("bleed_ok") is False and not pf.get("bleed_decision"):
+        if pf.get("bleed_ok") is not True and not (
+                pf.get("bleed_ok") is False
+                and pf.get("bleed_decision") in ("preserve_design_with_border", "operator_approved_correction")
+                and pf.get("decision_actor_id")
+                and pf.get("decision_at")
+                and pf.get("decision_original_file_id") == job.artwork.get("original_file_id")):
             return AgentResult(
                 job_id=job.job_id, agent=self.name, status=AgentStatus.STOP,
                 next_agent=AgentName.PREFLIGHT,

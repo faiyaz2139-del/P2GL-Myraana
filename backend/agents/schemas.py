@@ -32,6 +32,7 @@ class AgentResult(BaseModel):
 
 class JobState(BaseModel):
     job_id: str
+    generation: int = Field(default=0, ge=0)
     product: str = "business_card"
     quantity: int
     order_spec: Dict[str, Any] = Field(default_factory=dict)

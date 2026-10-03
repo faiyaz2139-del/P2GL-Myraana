@@ -25,13 +25,7 @@ class MultiAgentOrchestrator:
 
     def run_step(self, agent_name: AgentName, job: JobState) -> AgentResult:
         if agent_name == AgentName.COMPLETE:
-            return AgentResult(
-                job_id=job.job_id,
-                agent=AgentName.QC,
-                status=AgentStatus.PASS,
-                next_agent=AgentName.COMPLETE,
-                summary="Job workflow complete.",
-            )
+            return self.agents[AgentName.QC].run(job)
         return self.agents[agent_name].run(job)
 
     def run_until_gate(self, job: JobState, start: AgentName = AgentName.ORDER, max_steps: int = 20) -> List[AgentResult]:
