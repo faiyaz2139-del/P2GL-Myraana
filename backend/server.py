@@ -15,6 +15,7 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
 from p2g.ai import configured as ai_configured, conversation_events
+from p2g.agent_bridge import evaluate_agents
 from p2g.core import AppError, db, new_id, now
 from p2g.pdfcheck import render_page
 from p2g.workflow import (
@@ -412,6 +413,15 @@ async def control_job(job_id: str, request: Request):
     return job
 
 
+@api.post("/jobs/{job_id}/agents/evaluate")
+async def evaluate_job_agents(job_id: str, request: Request):
+    assert_origin(request)
+    user = require_user(await current_user(request))
+    if await request.body():
+        raise AppError("Agent evaluation accepts no client-supplied state.", 400)
+    return await evaluate_agents(job_id, user["name"])
+
+
 @api.post("/jobs/{job_id}/action")
 async def job_action(job_id: str, request: Request):
     assert_origin(request)
@@ -502,9 +512,20 @@ async def job_action(job_id: str, request: Request):
             checks = payload.get("checks") or {}
             passed = all(checks.get(key) is True for key in ("quantity", "alignment", "appearance", "finishing"))
             if not passed:
+                job["qc"] = {
+                    "result": "FAIL",
+                    "confirmed_by": user["name"],
+                    "confirmed_at": now(),
+                    "reason": "One or more operator quality checks failed.",
+                }
                 job.pop("authorization", None)
                 update_task(job, 14, "Needs attention", "Quality check rejected; rework is required.", user["name"])
             else:
+                job["qc"] = {
+                    "result": "PASS",
+                    "confirmed_by": user["name"],
+                    "confirmed_at": now(),
+                }
                 update_task(job, 14, "Completed", "Final quality check passed.", user["name"])
                 update_task(job, 15, "Waiting for operator", "Pack and label the order.", user["name"])
         elif action == "rework":
