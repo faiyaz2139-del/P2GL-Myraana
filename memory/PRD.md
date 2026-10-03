@@ -43,6 +43,10 @@ Myraana and never send a print command or claim physical production completed.
 - PASS: sanitized source archive excludes `.env`, QA credentials, databases, and
   credential literals. QA report and desktop/mobile proof screenshots are in
   `/app/artifacts/`.
+- Release evidence is published as static preview downloads under
+  `/setup/releases/`. Criterion 16 records the credential-like build-transcript
+  incident as unresolved; its real/sample classification and any rotation action
+  require platform security investigation.
 - NOT VERIFIED: live connector/hardware, direct Anthropic/OpenAI credentials, and
   live custom-domain routing.
 - FAIL (honestly blocked): managed LLM tool-call probe returned a provider-side
