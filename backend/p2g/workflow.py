@@ -130,6 +130,7 @@ def reset_from(job, index, reason):
     job.pop("authorization", None)
     if index <= 8:
         job.pop("route", None)
+        job.pop("readiness", None)
     if index <= 6:
         job.pop("verification", None)
     if index <= 3:

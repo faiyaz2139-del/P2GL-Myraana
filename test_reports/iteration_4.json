@@ -1,0 +1,38 @@
+{
+  "summary": "Independent read-only regression of the settings-mutation invariant on isolated DB p2g_settings_audit_qa. All 8 pytest assertions passed and a UI-side negative check confirmed the server rejects old-generation actions. Verified: PRINT_READY proof preserved, approval retained with generation bumped to match job (gen=3), route and authorization absent, steps 9/10/11 (and 12) reset to Pending, and an old-generation 'route' action rejected with 409 'Job version changed. Refresh before continuing.' No AI, connector, hardware, settings-mutation, or job-creation calls were made beyond the single explicitly-permitted old-generation action (which is a safe no-op by design).",
+  "scope": "Backend regression (pytest) + lightweight frontend sanity (list view + /api negative check via browser). Isolated QA DB only.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "regression_results": {
+    "job": {"id_prefix": "6ab3cd23", "generation": 3, "state": "active"},
+    "1_print_ready_proof_preserved": "PASS - PRINT_READY file still present with original sha",
+    "2_approval_preserved_generation_matches": "PASS - approval.generation == job.generation == 3 and approval.sha matches current PRINT_READY",
+    "3_route_absent": "PASS - job.route is absent",
+    "3_authorization_absent": "PASS - job.authorization is absent",
+    "4_task_9_route_choice_reset": "PASS - 'Choose production route' = Pending",
+    "4_task_10_rip_handoff_reset": "PASS - 'Prepare imposition and RIP handoff' = Pending",
+    "4_task_11_readiness_reset": "PASS - 'Verify shop readiness' = Pending",
+    "4_task_12_authorize_reset_bonus": "PASS - 'Authorize production' = Pending",
+    "5_old_generation_action_rejected": "PASS - POST /api/jobs/{id}/action {action:'route', generation:2} => 409 'Job version changed. Refresh before continuing.'; job state unchanged after the attempt",
+    "ui_sanity": "Job list shows 'Settings QA' with Pending badge consistent with revoked route; UI did not expose a Route/Authorize completed state."
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_settings_mutation_regression.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "backend/p2g/workflow.py reset_from(): resets task rows and pops approval/authorization/route/verification/bleedDecision, but does NOT pop job['readiness']. After a settings mutation the stale readiness snapshot (checkedAt + destination) remains on the job even though task 11 is reset to Pending. The server does re-run readiness() inside the 'authorize' action, so there is no exploitable bypass today, but any future code path that trusts job['readiness'] without re-checking would silently use a stale value. Low priority; consider popping 'readiness' inside reset_from() for consistency with route/authorization.",
+    "backend/server.py update_settings(): mutates in-memory job documents inside a loop and awaits save_job() per-job without a transaction; concurrent settings updates on the same tenant could race. Not an issue in single-admin QA DB but worth noting for multi-admin production."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_settings_mutation_regression.py (new)"
+  ],
+  "success_rate": {"backend": "100% (8/8 pytest)", "frontend": "100% (sanity + negative check)"},
+  "test_credentials": "QA account qa@print2go.test used for login only; not persisted to artifacts or /app/memory/test_credentials.md.",
+  "seed_data_creation": "None. Used the pre-seeded isolated QA job and the already-applied settings mutation. No connector / AI / hardware calls were made.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Isolated DB p2g_settings_audit_qa currently holds the Settings QA job at generation 3 after one admin settings mutation. Approval + PRINT_READY are preserved; route, authorization, and steps 9-12 are reset to Pending. test_settings_mutation_regression.py is a reusable regression; it only issues one deliberate 409-expected action and otherwise read-only. If the main agent wants to extend this, popping job['readiness'] inside reset_from() is the only code-review nit worth considering.",
+  "rca_of_the_issue": "Not a bug run - this was a verification run. All spec invariants hold. One minor consistency observation (stale job['readiness'] after reset_from) documented in critical_code_review_comments."
+}
