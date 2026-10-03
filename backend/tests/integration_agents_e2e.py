@@ -185,7 +185,7 @@ class IntegrationRun:
                 json={
                     "customer": "ZZTEST-Agent-E2E",
                     "quantity": 100,
-                    "sides": 2,
+                    "sides": 1,
                     "stock": "14pt matte",
                     "finish": "Matte",
                     "due": "2030-01-01",
@@ -241,7 +241,8 @@ class IntegrationRun:
                     "acknowledged": True,
                 },
             )
-            self.record("exact-file proof approval", response.status_code == 200, http=response.status_code)
+            self.v1_approval = response.status_code == 200
+            self.record("exact-file proof approval", self.v1_approval, http=response.status_code, file_id=self.print_ready["id"], checksum=self.print_ready["sha"])
             asyncio.run(self.seed_capability())
             self.latest_job()
             for action, data in (("route", {}), ("handoff", {"note": "ZZTEST staging only"})):
@@ -311,7 +312,8 @@ class IntegrationRun:
             self.job = response.json()
             self.record(
                 "changed artwork invalidates prior approval",
-                response.status_code == 200 and not self.job.get("approval"),
+                self.v1_approval and response.status_code == 200 and not self.job.get("approval"),
+                approval_existed_before_v2=self.v1_approval,
                 generation=self.job.get("generation"),
             )
             response = self.request("POST", f"/jobs/{self.job_id}/process", json={"generation": self.job["generation"]})
@@ -325,6 +327,8 @@ class IntegrationRun:
                 response.status_code == 200 and last.get("agent") == "production" and last.get("status") == "STOP",
                 last=last,
             )
+            qc_attempt = self.request("POST", f"/jobs/{self.job_id}/action", json={"action": "qc", "generation": self.job["generation"], "checks": {}})
+            self.record("QC cannot complete without real operator confirmation", qc_attempt.status_code == 409, http=qc_attempt.status_code, reason="No physical operator-confirmed QC stage was fabricated in this non-printing test.")
             self.record("physical printing never triggered", True, physical_print_enabled=False)
 
         for name, callback in (

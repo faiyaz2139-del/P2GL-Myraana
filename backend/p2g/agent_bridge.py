@@ -1,3 +1,4 @@
+import hashlib
 from datetime import datetime, timedelta, timezone
 
 from agents.orchestrator import MultiAgentOrchestrator
@@ -96,13 +97,19 @@ async def evaluate_agents(job_id, actor):
             raise AppError("Job not found.", 404)
         if job.get("state") != "active":
             raise AppError(f"This job is {job.get('state')}. Resume it before evaluation.")
+        state = await build_job_state(job)
+        state_signature = hashlib.sha256(state.model_dump_json().encode()).hexdigest()
         existing = await db.executions.find_one(
-            {"job_id": job_id, "action": "agents_evaluate", "generation": job["generation"]},
+            {
+                "job_id": job_id,
+                "action": "agents_evaluate",
+                "generation": job["generation"],
+                "state_signature": state_signature,
+            },
             {"_id": 0},
         )
         if existing:
             return {"execution": existing["id"], "results": existing["results"], "idempotent": True}
-        state = await build_job_state(job)
         results = [item.model_dump(mode="json") for item in MultiAgentOrchestrator().run_until_gate(state)]
         for result in results:
             record_event(job, f"Agent {result['agent']}: {result['summary']}", actor)
@@ -113,6 +120,7 @@ async def evaluate_agents(job_id, actor):
                 "job_id": job_id,
                 "generation": job["generation"],
                 "action": "agents_evaluate",
+                "state_signature": state_signature,
                 "status": results[-1]["status"] if results else "STOP",
                 "actor": actor,
                 "results": results,

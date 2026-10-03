@@ -39,7 +39,7 @@
       "check": "create ZZTEST job",
       "status": "PASS",
       "evidence": {
-        "job_id": "5044b7ad-c099-43ad-8e0a-9b5efd38751f"
+        "job_id": "0f0d9a60-0568-4077-b9f2-6c0ce875015a"
       }
     },
     {
@@ -58,17 +58,54 @@
     },
     {
       "check": "independent PRINT_READY verification",
-      "status": "FAIL",
+      "status": "PASS",
       "evidence": {
-        "file_id": null,
-        "checksum": null
+        "file_id": "621f4f11-1ec0-4210-b471-abee582d70e6",
+        "checksum": "2baf56c31ef25747c03c57d00b3df44aabbbce0cf8961dee04c0f6b341ebc9c0"
       }
     },
     {
-      "check": "approval and route",
-      "status": "FAIL",
+      "check": "exact-file proof approval",
+      "status": "PASS",
       "evidence": {
-        "reason": "PRINT_READY missing; downstream checks are recorded as failed."
+        "http": 200,
+        "file_id": "621f4f11-1ec0-4210-b471-abee582d70e6",
+        "checksum": "2baf56c31ef25747c03c57d00b3df44aabbbce0cf8961dee04c0f6b341ebc9c0"
+      }
+    },
+    {
+      "check": "route workflow action",
+      "status": "PASS",
+      "evidence": {
+        "http": 200
+      }
+    },
+    {
+      "check": "handoff workflow action",
+      "status": "PASS",
+      "evidence": {
+        "http": 200
+      }
+    },
+    {
+      "check": "simulated connector heartbeat",
+      "status": "PASS",
+      "evidence": {
+        "http": 200
+      }
+    },
+    {
+      "check": "readiness workflow action",
+      "status": "PASS",
+      "evidence": {
+        "http": 200
+      }
+    },
+    {
+      "check": "authorize workflow action",
+      "status": "PASS",
+      "evidence": {
+        "http": 200
       }
     },
     {
@@ -80,99 +117,19 @@
     },
     {
       "check": "QC never completes without operator confirmation",
-      "status": "FAIL",
+      "status": "PASS",
       "evidence": {
-        "execution": "19f99c59-f130-445f-9fe2-14a8283673f2",
+        "execution": "9c595d69-7bc7-43db-87ab-5f4a488f0fe8",
         "last": {
-          "job_id": "5044b7ad-c099-43ad-8e0a-9b5efd38751f",
-          "agent": "preflight",
+          "job_id": "0f0d9a60-0568-4077-b9f2-6c0ce875015a",
+          "agent": "qc",
           "status": "STOP",
-          "next_agent": "preflight",
-          "summary": "Preflight stopped the job.",
-          "data": {
-            "measured": false,
-            "unsafe_content": true,
-            "bleed_ok": true,
-            "bleed_decision": null,
-            "dpi_warning": null,
-            "pages": [
-              {
-                "page": 1,
-                "widthInches": 3.75,
-                "heightInches": 2.25,
-                "boxes": {
-                  "MediaBox": {
-                    "explicit": true,
-                    "box": [
-                      0.0,
-                      0.0,
-                      270.0,
-                      162.0
-                    ]
-                  },
-                  "CropBox": {
-                    "explicit": false,
-                    "box": [
-                      0.0,
-                      0.0,
-                      270.0,
-                      162.0
-                    ]
-                  },
-                  "BleedBox": {
-                    "explicit": false,
-                    "box": [
-                      0.0,
-                      0.0,
-                      270.0,
-                      162.0
-                    ]
-                  },
-                  "TrimBox": {
-                    "explicit": false,
-                    "box": [
-                      0.0,
-                      0.0,
-                      270.0,
-                      162.0
-                    ]
-                  },
-                  "ArtBox": {
-                    "explicit": false,
-                    "box": [
-                      0.0,
-                      0.0,
-                      270.0,
-                      162.0
-                    ]
-                  }
-                },
-                "rotation": 0,
-                "fonts": [
-                  {
-                    "name": "AAAAAA+DejaVuSans-Bold",
-                    "type": "TrueType",
-                    "embedded": true,
-                    "used": true
-                  },
-                  {
-                    "name": "AAAAAA+DejaVuSans",
-                    "type": "TrueType",
-                    "embedded": true,
-                    "used": true
-                  }
-                ],
-                "images": [],
-                "unsafeText": [],
-                "colourOperators": [
-                  "DeviceCMYK"
-                ]
-              }
-            ]
-          },
+          "next_agent": "qc",
+          "summary": "QC confirmation is required.",
+          "data": {},
           "warnings": [],
           "stop_reasons": [
-            "Artwork violates a hard safety/quality rule."
+            "No QC result recorded."
           ]
         }
       }
@@ -181,14 +138,15 @@
       "check": "duplicate agent evaluation idempotent",
       "status": "PASS",
       "evidence": {
-        "execution": "19f99c59-f130-445f-9fe2-14a8283673f2",
-        "event_count": 3
+        "execution": "9c595d69-7bc7-43db-87ab-5f4a488f0fe8",
+        "event_count": 8
       }
     },
     {
       "check": "changed artwork invalidates prior approval",
       "status": "PASS",
       "evidence": {
+        "approval_existed_before_v2": true,
         "generation": 3
       }
     },
@@ -201,100 +159,28 @@
     },
     {
       "check": "disconnected shop stops production",
-      "status": "FAIL",
+      "status": "PASS",
       "evidence": {
         "last": {
-          "job_id": "5044b7ad-c099-43ad-8e0a-9b5efd38751f",
-          "agent": "preflight",
+          "job_id": "0f0d9a60-0568-4077-b9f2-6c0ce875015a",
+          "agent": "production",
           "status": "STOP",
-          "next_agent": "preflight",
-          "summary": "Preflight stopped the job.",
-          "data": {
-            "measured": false,
-            "unsafe_content": true,
-            "bleed_ok": true,
-            "bleed_decision": null,
-            "dpi_warning": null,
-            "pages": [
-              {
-                "page": 1,
-                "widthInches": 3.75,
-                "heightInches": 2.25,
-                "boxes": {
-                  "MediaBox": {
-                    "explicit": true,
-                    "box": [
-                      0.0,
-                      0.0,
-                      270.0,
-                      162.0
-                    ]
-                  },
-                  "CropBox": {
-                    "explicit": false,
-                    "box": [
-                      0.0,
-                      0.0,
-                      270.0,
-                      162.0
-                    ]
-                  },
-                  "BleedBox": {
-                    "explicit": false,
-                    "box": [
-                      0.0,
-                      0.0,
-                      270.0,
-                      162.0
-                    ]
-                  },
-                  "TrimBox": {
-                    "explicit": false,
-                    "box": [
-                      0.0,
-                      0.0,
-                      270.0,
-                      162.0
-                    ]
-                  },
-                  "ArtBox": {
-                    "explicit": false,
-                    "box": [
-                      0.0,
-                      0.0,
-                      270.0,
-                      162.0
-                    ]
-                  }
-                },
-                "rotation": 0,
-                "fonts": [
-                  {
-                    "name": "AAAAAA+DejaVuSans-Bold",
-                    "type": "TrueType",
-                    "embedded": true,
-                    "used": true
-                  },
-                  {
-                    "name": "AAAAAA+DejaVuSans",
-                    "type": "TrueType",
-                    "embedded": true,
-                    "used": true
-                  }
-                ],
-                "images": [],
-                "unsafeText": [],
-                "colourOperators": [
-                  "DeviceCMYK"
-                ]
-              }
-            ]
-          },
+          "next_agent": "production",
+          "summary": "Exact-file human proof approval is required.",
+          "data": {},
           "warnings": [],
           "stop_reasons": [
-            "Artwork violates a hard safety/quality rule."
+            "No approved production file/checksum."
           ]
         }
+      }
+    },
+    {
+      "check": "QC cannot complete without real operator confirmation",
+      "status": "PASS",
+      "evidence": {
+        "http": 409,
+        "reason": "No physical operator-confirmed QC stage was fabricated in this non-printing test."
       }
     },
     {
@@ -316,7 +202,7 @@
     }
   ],
   "summary": {
-    "pass": 14,
-    "fail": 4
+    "pass": 24,
+    "fail": 0
   }
 }
