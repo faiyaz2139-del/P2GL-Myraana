@@ -1,0 +1,44 @@
+{
+  "summary": "Narrow read-only verification of the stale job.readiness cleanup fix on the pre-existing isolated Settings QA job. 4 of 5 assertions pass. The primary assertion (job.readiness absent) FAILS: the job still holds the stale snapshot {'checkedAt':'2026-10-03T01:36:16.619462+00:00','destination':'/qa/no-print'} because the single-line cleanup in reset_from() (workflow.py line 133: job.pop('readiness', None)) was added AFTER the original settings mutation on this job. The cleanup is correctly in the code and will apply on any future reset_from() invocation, but the existing stale value persists on the already-mutated job and cannot be cleared without triggering a new reset (explicitly out of scope per the review request).",
+  "scope": "Backend only, read-only. No settings mutation, no job action, no connector/AI/hardware calls, no new reset event.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "N/A (data state, not endpoint)",
+        "issue": "Pre-existing isolated QA job still carries stale job.readiness snapshot from the pre-fix mutation. The code fix (workflow.py reset_from, line 133 'job.pop(\"readiness\", None)') is correct and in place for all future reset_from() calls, but will not retroactively clean the already-mutated job. Replaying/re-triggering a route reset on this job would clear it, however that is explicitly out of scope for this test (would mutate the job and bump generation)."
+      }
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "regression_results": {
+    "job": {"id": "6ab3cd23-90e3-47e1-8791-faf358291128", "customer": "Settings QA", "generation": 3, "state": "active"},
+    "readiness_absent": "FAIL - job.readiness still present: {'checkedAt':'2026-10-03T01:36:16.619462+00:00','destination':'/qa/no-print'}",
+    "print_ready_preserved": "PASS",
+    "approval_generation_matches": "PASS (approval.generation == job.generation == 3, approval.sha matches current PRINT_READY)",
+    "route_absent": "PASS",
+    "authorization_absent": "PASS"
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_readiness_cleanup_regression.py",
+    "/app/test_reports/pytest/readiness_cleanup_results.xml"
+  ],
+  "action_items": [
+    "Confirm the stale pre-existing job.readiness is acceptable to leave as-is on this QA job (the fix guards future resets but is non-retroactive). If retroactive cleanup is desired, main agent can either (a) run a one-off DB $unset for 'readiness' on jobs where route is absent, or (b) permit a route reset replay on this QA job (would bump generation to 4 and mutate the job).",
+    "No code changes required - fix at workflow.py:133 is correct and in place."
+  ],
+  "critical_code_review_comments": [
+    "workflow.py reset_from() (line 128-133): The readiness pop is correctly scoped under 'if index <= 8' alongside route, which is consistent with route authority driving readiness validity. Correct.",
+    "There is no backfill/migration path for pre-existing jobs that were reset before this fix shipped. For a single isolated QA job this is immaterial, but in production a $unset migration script may be warranted if any live jobs have the stale field."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_readiness_cleanup_regression.py (new, read-only)"
+  ],
+  "success_rate": {"backend": "80% (4/5 pytest assertions; the 1 failure is the exact stale-snapshot state the request asked us to verify)"},
+  "test_credentials": "QA account qa@print2go.test used for login only; not persisted.",
+  "seed_data_creation": "None. No mutations.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Isolated DB job 6ab3cd23 still carries stale job.readiness (destination '/qa/no-print') from a pre-fix settings mutation. All other invariants (PRINT_READY, approval@gen3, route absent, authorization absent) hold. The reset_from() fix is in place (workflow.py:133) and will apply on any future reset. Do not trigger a new reset on this job unless the main agent explicitly asks for a replay verification.",
+  "rca_of_the_issue": "The stale readiness snapshot was introduced before line 133 (job.pop('readiness', None)) was added to reset_from(). The code fix is correct and will prevent the issue on any future route/settings-driven reset. Because the test request forbids creating a new reset event on the existing QA job, the stale value cannot be cleared in-place and is reported as-is. Mitigation options for main agent: (1) accept as a one-time pre-existing data state on isolated QA; (2) one-off $unset migration on job documents; (3) allow a controlled replay (would mutate the job)."
+}
