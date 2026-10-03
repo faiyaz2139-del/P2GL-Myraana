@@ -1,0 +1,33 @@
+{
+  "summary": "Narrow regression on the Operator recovery fix (QC rejection -> rework; blocked readiness -> connect shop). Backend: 6/6 pytest assertions PASS using an in-memory synthetic job fixture plus source-anchor checks on backend/server.py job_action rework branch. Frontend: static source review of frontend/src/App.js actionPanel confirms the three required branches render the correct testids with no artwork-upload fallthrough. No production DB, no auth, no persistent records.",
+  "scope": "Backend (unit + source anchor) and Frontend (static source review). No HTTP calls, no DB mutations, no Playwright journey required (per request: isolated synthetic fixture only; do not authenticate against production).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "verifications": {
+    "frontend_qc_needs_attention_branch": "App.js:313 — current===14 && task.status==='Needs attention' renders <button data-testid=\"start-rework-button\"> calling act('rework'). PASS",
+    "frontend_qc_normal_branch": "App.js:314 + QCAction (App.js:355-357) — current===14 (default) renders <button data-testid=\"record-qc-button\">. PASS",
+    "frontend_readiness_blocked_branch": "App.js:309 — current===10 renders action-row with <button data-testid=\"check-readiness-button\"> and <button data-testid=\"connect-shop-button\">. PASS",
+    "frontend_no_artwork_upload_on_readiness": "artwork-upload-input is only rendered on App.js:303 (current===1 OR current<=6 && status==='Blocked'). Branch is a short-circuit return, so readiness (current===10) cannot fall through to artwork-upload-input. PASS",
+    "backend_rework_lands_task12_reauth": "server.py:510-517 rework branch guards on tasks[14].status==='Needs attention', pops authorization, resets tasks[11..15] to Pending, then update_task(job, 11, 'Waiting for approval', 'Re-authorize the verified production PDF.'). Index 11 == task #12 (1-indexed) == human reauthorization. PASS (6/6 pytest assertions incl. source-anchor regex)."
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_rework_recovery_regression.py",
+    "/app/test_reports/pytest/rework_recovery_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "actionPanel ordering in App.js is correct: QC-Needs-attention short-circuit (line 313) precedes the generic QCAction fallback (line 314), so record-qc-button is never shown in a rejection state.",
+    "artwork-upload-input is only exposed on current===1 or current<=6 with status==='Blocked'; it cannot leak into readiness (current===10) or QC (current===14) branches due to early returns.",
+    "backend rework branch is idempotent-safe: it rejects (AppError) unless tasks[14].status==='Needs attention', guaranteeing it cannot be used as an arbitrary rewind."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_rework_recovery_regression.py (new)"
+  ],
+  "success_rate": {"backend": "100% (6/6)", "frontend": "100% (static source review, 4/4 branch checks)"},
+  "test_credentials": "None used.",
+  "seed_data_creation": "None. Synthetic job dict exists only in test process memory.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Operator recovery UI/API contract is green. If a future change touches server.py rework branch (lines ~510-517) or App.js actionPanel (lines 303-315), rerun /app/backend/tests/test_rework_recovery_regression.py — the source-anchor regex test will flag drift (e.g. accidental update_task(job, 10, ...) or dropping the Needs-attention guard).",
+  "rca_of_the_issue": "Not applicable — this iteration is a confirmatory regression; no new defect was observed. Prior recovery bug (QC rejection surfacing artwork upload or readiness branch missing Connect shop) is resolved in the current source: App.js:313 isolates start-rework-button and App.js:309 renders both check-readiness-button and connect-shop-button without the artwork input."
+}

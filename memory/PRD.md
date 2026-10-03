@@ -60,6 +60,9 @@ Myraana and never send a print command or claim physical production completed.
   cleanup verification (5/5). Changing shop settings preserves the unchanged
   verified proof approval while revoking route, readiness, authorization, and
   downstream route tasks. The isolated QA database was deleted afterward.
+- PASS: focused operator recovery regression (6/6). Rejected final QC exposes
+  protected rework and returns to human reauthorization; readiness recovery
+  exposes Connect shop and retry readiness without artwork-upload drift.
 - NOT VERIFIED: live connector/hardware, direct Anthropic/OpenAI credentials, and
   live custom-domain routing.
 - FAIL (honestly blocked): managed LLM tool-call probe returned a provider-side
