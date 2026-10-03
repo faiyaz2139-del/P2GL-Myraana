@@ -6,7 +6,7 @@ import bcrypt
 from fastapi import HTTPException, Request
 from motor.motor_asyncio import AsyncIOMotorGridFSBucket
 
-from p2g.core import AppError, db, new_id, now, sha256
+from p2g.core import AppError, db, lock, new_id, now, unlock, sha256
 from p2g.pdfcheck import PdfError, inspect, make_print_ready, prepare, render_page, verify
 
 
@@ -66,7 +66,17 @@ def record_event(job, text, actor="Application"):
     )
 
 
-def update_task(job, index, status, result, actor="Application", evidence=None):
+def update_task(
+    job,
+    index,
+    status,
+    result,
+    actor="Application",
+    evidence=None,
+    execution=None,
+    error=None,
+    recovery=None,
+):
     item = job["tasks"][index]
     item["status"] = status
     item["result"] = result
@@ -76,6 +86,19 @@ def update_task(job, index, status, result, actor="Application", evidence=None):
         item["finished"] = now()
     if evidence and evidence not in item["evidence"]:
         item["evidence"].append(evidence)
+    if execution and execution not in item["executions"]:
+        item["executions"].append(execution)
+    if error:
+        item["error"] = error
+    if recovery:
+        item["recovery"] = recovery
+    item["next"] = {
+        "Needs attention": "Review the details, then choose the stated operator decision.",
+        "Waiting for approval": "Review the actual proof and approve this exact file.",
+        "Waiting for operator": "Complete the stated operator action when it is true.",
+        "Failed": "Retry from saved evidence or upload corrected artwork.",
+        "Blocked": "Upload corrected artwork or resolve the stated block.",
+    }.get(status, "")
     record_event(job, result, actor)
 
 
@@ -126,6 +149,8 @@ async def ensure_collections():
     await db.sessions.create_index("expires")
     await db.connector_nonces.create_index("created", expireAfterSeconds=300)
     await db.connector_nonces.create_index("nonce", unique=True)
+    await db.executions.create_index([("job_id", 1), ("status", 1)])
+    await db.executions.create_index("lease_until")
     await db.bootstrap.update_one(
         {"_id": "first-run"},
         {"$setOnInsert": {"configured": False, "created": now()}},
@@ -225,11 +250,15 @@ async def file_bytes(job, record):
     return content
 
 
-async def save_job(job):
+async def save_job(job, token=None):
     job["updated"] = now()
+    data = {key: value for key, value in job.items() if key not in {"revision", "_id"}}
+    query = {"_id": job["id"], "revision": job["revision"]}
+    if token:
+        query["lock"] = token
     result = await db.jobs.replace_one(
-        {"_id": job["id"], "revision": job["revision"]},
-        {**job, "_id": job["id"], "revision": job["revision"] + 1},
+        query,
+        {"_id": job["id"], **data, "revision": job["revision"] + 1},
     )
     if not result.matched_count:
         raise AppError("This job changed in another session. Refresh and retry.")
@@ -241,18 +270,26 @@ async def get_job(job_id):
     return public(await db.jobs.find_one({"_id": job_id}))
 
 
-async def run_pdf_workflow(job, actor):
+async def run_pdf_workflow(job, actor, execution=None, token=None):
+    if job.get("state") != "active":
+        raise AppError(f"This job is {job.get('state')}. Resume it before processing.")
+
+    async def persist():
+        await save_job(job, token)
+
     original = latest(job, "ORIGINAL")
     if not original:
         raise AppError("Upload artwork first.")
     content = await file_bytes(job, original)
     try:
         if job["tasks"][2]["status"] != "Completed":
+            update_task(job, 2, "Running", "Checking artwork against the pinned recipe.", actor, execution=execution)
+            await persist()
             report = inspect(content, job["recipe"], job["sides"])
             job["inspection"] = report
             if report["errors"]:
                 update_task(job, 2, "Blocked", " ".join(report["errors"]), actor, original["id"])
-                await save_job(job)
+                await persist()
                 return job
             update_task(
                 job,
@@ -263,6 +300,8 @@ async def run_pdf_workflow(job, actor):
                 original["id"],
             )
         if job["tasks"][3]["status"] != "Completed":
+            update_task(job, 3, "Running", "Reviewing bleed handling.", actor, execution=execution)
+            await persist()
             if job["inspection"]["bleed"] == "missing" and not job.get("bleedDecision"):
                 update_task(
                     job,
@@ -272,10 +311,12 @@ async def run_pdf_workflow(job, actor):
                     actor,
                     original["id"],
                 )
-                await save_job(job)
+                await persist()
                 return job
             update_task(job, 3, "Completed", "Bleed decision recorded.", actor, original["id"])
         if job["tasks"][4]["status"] != "Completed":
+            update_task(job, 4, "Running", "Preparing the protected working copy.", actor, execution=execution)
+            await persist()
             prepared = prepare(content, job["recipe"], job.get("bleedDecision") == "blank-border")
             working = await create_file(
                 job,
@@ -286,6 +327,8 @@ async def run_pdf_workflow(job, actor):
             )
             update_task(job, 4, "Completed", "Working copy saved. Original artwork preserved.", actor, working["id"])
         if job["tasks"][5]["status"] != "Completed":
+            update_task(job, 5, "Running", "Generating PRINT_READY from the saved working copy.", actor, execution=execution)
+            await persist()
             working = latest(job, "WORKING_COPY")
             prepared = await file_bytes(job, working)
             produced = make_print_ready(prepared, job["recipe"], job["id"], job["generation"])
@@ -298,6 +341,8 @@ async def run_pdf_workflow(job, actor):
             )
             update_task(job, 5, "Completed", "PRINT_READY PDF stored with a checksum.", actor, print_ready["id"])
         if job["tasks"][6]["status"] != "Completed":
+            update_task(job, 6, "Running", "Reopening and verifying the production PDF.", actor, execution=execution)
+            await persist()
             print_ready = latest(job, "PRINT_READY")
             report = verify(
                 await file_bytes(job, print_ready),
@@ -314,7 +359,7 @@ async def run_pdf_workflow(job, actor):
             }
             if report["errors"]:
                 update_task(job, 6, "Blocked", " ".join(report["errors"]), actor, print_ready["id"])
-                await save_job(job)
+                await persist()
                 return job
             update_task(
                 job,
@@ -325,12 +370,109 @@ async def run_pdf_workflow(job, actor):
                 print_ready["id"],
             )
             update_task(job, 7, "Waiting for approval", "Review the actual production proof.", actor)
-        await save_job(job)
+        for task in job["tasks"][2:7]:
+            if task["status"] == "Completed" and execution and execution not in task["executions"]:
+                task["executions"].append(execution)
+        await persist()
         return job
     except PdfError as error:
-        update_task(job, 2, "Failed", str(error), actor)
-        await save_job(job)
+        update_task(
+            job,
+            2,
+            "Failed",
+            str(error),
+            actor,
+            execution=execution,
+            error=str(error),
+            recovery="Retry checks or upload a fresh PDF.",
+        )
+        await persist()
         return job
+
+
+async def process_with_lease(job_id, generation, actor):
+    """Claim a durable execution before any GridFS write and retain step evidence."""
+    token = await lock(job_id)
+    execution_id = new_id()
+    try:
+        job = await get_job(job_id)
+        if not job:
+            raise AppError("Job not found.", 404)
+        if job["generation"] != generation:
+            raise AppError("Artwork version changed. Refresh before continuing.")
+        if job.get("state") != "active":
+            raise AppError(f"This job is {job.get('state')}. Resume it before processing.")
+        if job["tasks"][6]["status"] == "Completed":
+            return {"queued": False, "job": job, "execution": None}
+        existing = await db.executions.find_one(
+            {"job_id": job_id, "generation": generation, "status": {"$in": ["Queued", "Running"]}},
+            {"_id": 0},
+        )
+        if existing:
+            raise AppError("Artwork processing is already claimed. Refresh for its saved progress.")
+        await db.executions.insert_one(
+            {
+                "_id": execution_id,
+                "job_id": job_id,
+                "generation": generation,
+                "action": "process",
+                "status": "Running",
+                "actor": actor,
+                "lease_until": (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat(),
+                "created": now(),
+                "updated": now(),
+            }
+        )
+        job["activeExecution"] = execution_id
+        await save_job(job, token)
+        result = await run_pdf_workflow(job, actor, execution_id, token)
+        state = "Blocked" if any(item["status"] in {"Blocked", "Failed"} for item in result["tasks"][2:7]) else "Completed"
+        await db.executions.update_one(
+            {"_id": execution_id},
+            {"$set": {"status": state, "updated": now(), "events": result["events"][-12:]}},
+        )
+        result.pop("activeExecution", None)
+        await save_job(result, token)
+        return {"queued": True, "job": result, "execution": execution_id}
+    except Exception as error:
+        await db.executions.update_one(
+            {"_id": execution_id},
+            {"$set": {"status": "Failed", "error": str(error), "updated": now()}},
+            upsert=True,
+        )
+        raise
+    finally:
+        await unlock(job_id, token)
+
+
+async def recover_interrupted_executions():
+    expired = await db.executions.find(
+        {"status": {"$in": ["Queued", "Running"]}, "lease_until": {"$lt": now()}},
+    ).to_list(100)
+    for execution in expired:
+        await db.executions.update_one(
+            {"_id": execution["_id"]},
+            {"$set": {"status": "Interrupted", "updated": now()}},
+        )
+        job = await get_job(execution["job_id"])
+        if not job or job.get("state") != "active":
+            continue
+        for task in job["tasks"][2:7]:
+            if task["status"] == "Running":
+                update_task(
+                    job,
+                    job["tasks"].index(task),
+                    "Failed",
+                    "Execution was interrupted. Retry safely from saved evidence.",
+                    "Application",
+                    execution=execution["_id"],
+                    recovery="Retry checks. Completed files remain immutable.",
+                )
+        job.pop("activeExecution", None)
+        try:
+            await save_job(job)
+        except AppError:
+            continue
 
 
 async def readiness(job):

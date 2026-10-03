@@ -1,0 +1,20 @@
+@media (max-width: 900px) {
+  .split-workspace {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .execution-panel {
+    order: 1;
+  }
+
+  .assistant-panel {
+    display: flex !important;
+    position: static;
+    order: 2;
+    min-height: 520px;
+    max-height: none;
+    border-top: 1px solid var(--line);
+    border-right: 0;
+  }
+}

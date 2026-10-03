@@ -12,14 +12,19 @@ import {
   PackageCheck,
   Plus,
   Printer,
+  Pause,
+  Play,
+  Send,
   Settings2,
   ShieldCheck,
+  Sparkles,
   Sun,
   Upload,
   Users,
   X,
 } from "lucide-react";
 import "@/App.css";
+import "@/mobile.css";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -171,7 +176,81 @@ function JobModal({ recipes, settings, close, created }) {
   </div>;
 }
 
-function JobView({ job, reload, back }) {
+function AssistantPanel({ job, settings, user, reload }) {
+  const [message, setMessage] = useState("");
+  const [stream, setStream] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!message.trim() || busy) return;
+    const text = message.trim();
+    setMessage("");
+    setStream("");
+    setError("");
+    setBusy(true);
+    try {
+      const response = await fetch(`${API}/jobs/${job.id}/chat`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text }),
+      });
+      if (!response.ok || !response.body) {
+        const data = await response.json();
+        throw new Error(data.error || "The assistant could not start safely.");
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        let split = buffer.indexOf("\n\n");
+        while (split >= 0) {
+          const frame = buffer.slice(0, split);
+          buffer = buffer.slice(split + 2);
+          const kind = frame.match(/^event: (.+)$/m)?.[1];
+          const raw = frame.match(/^data: (.+)$/m)?.[1];
+          if (raw) {
+            const data = JSON.parse(raw);
+            if (kind === "text") setStream((value) => value + data.text);
+            if (kind === "error") setError(data.error);
+          }
+          split = buffer.indexOf("\n\n");
+        }
+      }
+      await reload();
+    } catch (reason) {
+      setError(reason.message);
+      setMessage(text);
+    } finally {
+      setBusy(false);
+      setStream("");
+    }
+  };
+  return <aside className="assistant-panel" data-testid="job-assistant-panel">
+    <div className="assistant-heading">
+      <div className="ai-icon"><Sparkles size={18} /></div>
+      <div><strong>Print2Go Assistant</strong><p>{settings?.aiConnected ? "Backend configured" : "Setup needed"}</p></div>
+    </div>
+    <div className="chat-messages" data-testid="assistant-message-history">
+      <div className="assistant-intro"><span className="eyebrow">LET’S MAKE THIS PRINT.</span><h3>One job.<br />A clear path forward.</h3><p>I explain verified records. Job controls always handle human decisions.</p></div>
+      <div className="assistant-context"><FileText size={17} /><div>{job.customer}<small>{job.quantity.toLocaleString()} business cards · Recipe v{job.recipe.version}</small></div></div>
+      {!settings?.aiConnected && <div className="notice" data-testid="assistant-unconfigured-notice">Assistant setup is unavailable. You can complete this workflow using the job controls.</div>}
+      {(job.messages || []).map((item) => <div className={`message ${item.role}`} key={item.id}><span>{item.role === "user" ? user.name : "Assistant"}</span><p>{item.text}</p></div>)}
+      {stream && <div className="message assistant" data-testid="assistant-streaming-message"><span>Assistant</span><p>{stream}</p></div>}
+      {error && <div className="notice warning" data-testid="assistant-error">{error}</div>}
+    </div>
+    <form className="chat-compose" onSubmit={submit} data-testid="assistant-chat-form">
+      <textarea value={message} onChange={(event) => setMessage(event.target.value)} maxLength="3000" rows="2" placeholder="Ask about this job…" data-testid="assistant-message-input" />
+      <div><span>Grounded in saved job records</span><button className="send-button" disabled={busy || !message.trim()} data-testid="assistant-send-button"><Send size={16} /></button></div>
+    </form>
+  </aside>;
+}
+
+function JobView({ job, reload, back, settings, user }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [ack, setAck] = useState(false);
@@ -224,19 +303,31 @@ function JobView({ job, reload, back }) {
     if (current === 1 || task.status === "Blocked") return <label className="upload-button primary" data-testid="artwork-upload-label"><Upload size={17} />{original ? "Upload revised artwork" : "Upload artwork"}<input type="file" accept="application/pdf" disabled={busy} data-testid="artwork-upload-input" onChange={(event) => upload(event.target.files?.[0])} /></label>;
     if (current === 2 || current === 4 || current === 5 || current === 6) return <button className="primary" onClick={process} disabled={busy} data-testid="process-artwork-button"><ShieldCheck size={17} />{busy ? "Checking…" : "Check artwork"}</button>;
     if (current === 3) return <div className="action-row"><button className="primary" disabled={busy} onClick={() => act("bleed", { decision: "blank-border" })} data-testid="accept-blank-border-button">Accept blank border</button><label className="button" data-testid="corrected-artwork-label">Upload corrected artwork<input type="file" accept="application/pdf" data-testid="corrected-artwork-input" onChange={(event) => upload(event.target.files?.[0])} /></label></div>;
-    if (current === 7) return <HumanAction label="I reviewed the actual proof, margins, and all notes." ack={ack} setAck={setAck} busy={busy} testId="approve-proof" onAction={() => act("approve", { sha: proof?.sha, acknowledged: ack })} />;
+    if (current === 7) return <HumanAction label="I reviewed the actual proof, margins, and all notes." buttonLabel="Approve proof" ack={ack} setAck={setAck} busy={busy} testId="approve-proof" onAction={() => act("approve", { sha: proof?.sha, acknowledged: ack })} />;
     if (current === 8) return <button className="primary" onClick={() => act("route")} disabled={busy} data-testid="select-route-button">Use production route</button>;
     if (current === 9) return <RIPAction action={act} busy={busy} />;
     if (current === 10) return <button className="primary" onClick={() => act("readiness")} disabled={busy} data-testid="check-readiness-button"><Link2 size={17} />Check shop readiness</button>;
-    if (current === 11) return <HumanAction label="I authorize staging this exact approved PDF. This does not print it." ack={ack} setAck={setAck} busy={busy} testId="authorize-production" onAction={() => act("authorize", { sha: proof?.sha, acknowledged: ack })} />;
-    if (current === 12) return <HumanAction label="The sheets have physically printed. A file copy does not count." ack={ack} setAck={setAck} busy={busy} testId="confirm-printed" onAction={() => act("printed", { acknowledged: ack })} />;
-    if (current === 13) return <HumanAction label="The cards have been cut and finished as ordered." ack={ack} setAck={setAck} busy={busy} testId="confirm-cut" onAction={() => act("cut", { acknowledged: ack })} />;
+    if (current === 11) return <HumanAction label="I authorize staging this exact approved PDF. This does not print it." buttonLabel="Authorize production" ack={ack} setAck={setAck} busy={busy} testId="authorize-production" onAction={() => act("authorize", { sha: proof?.sha, acknowledged: ack })} />;
+    if (current === 12) return <HumanAction label="The sheets have physically printed. A file copy does not count." buttonLabel="Confirm printed" ack={ack} setAck={setAck} busy={busy} testId="confirm-printed" onAction={() => act("printed", { acknowledged: ack })} />;
+    if (current === 13) return <div><p className="notice" data-testid="cutting-instructions">{job.recipe.cutInstructions}</p><HumanAction label="The cards have been cut and finished as ordered." buttonLabel="Confirm cut" ack={ack} setAck={setAck} busy={busy} testId="confirm-cut" onAction={() => act("cut", { acknowledged: ack })} /></div>;
     if (current === 14) return <QCAction action={act} busy={busy} />;
     if (current === 15) return <PackAction action={act} busy={busy} />;
     return null;
   };
-  return <main data-testid="job-detail-view">
-    <div className="job-toolbar"><button className="text-button" onClick={back} data-testid="back-to-jobs-button"><ArrowLeft size={16} />All jobs</button><span className="job-id">JOB {job.id.slice(0, 8).toUpperCase()}</span></div>
+  const control = async (state) => {
+    setBusy(true);
+    try {
+      await api(`jobs/${job.id}/control`, { method: "POST", body: JSON.stringify({ state }) });
+      await reload();
+    } catch (reason) {
+      setError(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <div className="job-shell" data-testid="job-detail-view">
+    <div className="job-toolbar"><button className="text-button" onClick={back} data-testid="back-to-jobs-button"><ArrowLeft size={16} />All jobs</button><span className="job-id">JOB {job.id.slice(0, 8).toUpperCase()}</span>{job.state === "active" && <button className="text-button" onClick={() => control("paused")} data-testid="pause-job-button"><Pause size={16} />Pause</button>}{job.state === "paused" && <button className="text-button" onClick={() => control("active")} data-testid="resume-job-button"><Play size={16} />Resume</button>}{job.state !== "complete" && job.state !== "cancelled" && <button className="text-button" onClick={() => control("cancelled")} data-testid="cancel-job-button"><X size={16} />Cancel</button>}</div>
+    <div className="split-workspace"><AssistantPanel job={job} settings={settings} user={user} reload={reload} />
     <div className="execution-panel">
       {error && <p className="notice warning" data-testid="job-action-error">{error}</p>}
       <div className="job-heading"><div><span className="eyebrow">BUSINESS CARDS · RECIPE V{job.recipe.version}</span><h1 data-testid="job-customer-title">{job.customer}</h1><p>{job.quantity.toLocaleString()} cards · {job.sides === 2 ? "Double-sided" : "Single-sided"} · Due {job.due}</p></div><Badge status={task.status} /></div>
@@ -247,11 +338,12 @@ function JobView({ job, reload, back }) {
       {job.inspection && <details className="inspection-details" open data-testid="inspection-details"><summary><AlertTriangle size={16} />Artwork inspection · {job.inspection.errors.length} blocking issue(s)</summary><div>{job.inspection.errors.map((item) => <p className="notice warning" key={item}>{item}</p>)}{job.inspection.warnings.map((item) => <p className="inspection-note" key={item}>{item}</p>)}</div></details>}
       <section className="tasks-section"><div className="section-heading"><h3>Production recipe</h3><span>{job.tasks.filter((item) => item.status === "Completed").length} / 16 complete</span></div><div className="task-list">{job.tasks.map((item, index) => <details className={`task ${index === current ? "current" : ""}`} key={item.id}><summary data-testid={`task-${index + 1}-summary`}><span className={`task-number ${item.status === "Completed" ? "done" : ""}`}>{item.status === "Completed" ? <Check size={15} /> : index + 1}</span><span className="task-title">{item.title}<small>{item.party === "Application" ? "Automated check" : "Human confirmation"}</small></span><Badge status={item.status} /></summary><div className="task-details"><p>{item.result}</p><div className="task-meta"><span>Updated {date(item.updated)}</span></div></div></details>)}</div></section>
     </div>
-  </main>;
+    </div>
+  </div>;
 }
 
-function HumanAction({ label, ack, setAck, busy, onAction, testId }) {
-  return <div><label className="check-label"><input type="checkbox" checked={ack} onChange={(event) => setAck(event.target.checked)} data-testid={`${testId}-checkbox`} />{label}</label><button className="primary" disabled={busy || !ack} onClick={onAction} data-testid={`${testId}-button`}>Confirm</button></div>;
+function HumanAction({ label, buttonLabel, ack, setAck, busy, onAction, testId }) {
+  return <div><label className="check-label"><input type="checkbox" checked={ack} onChange={(event) => setAck(event.target.checked)} data-testid={`${testId}-checkbox`} />{label}</label><button className="primary" disabled={busy || !ack} onClick={onAction} data-testid={`${testId}-button`}>{buttonLabel}</button></div>;
 }
 
 function RIPAction({ action, busy }) {
@@ -267,7 +359,7 @@ function QCAction({ action, busy }) {
 function PackAction({ action, busy }) {
   const [method, setMethod] = useState("collection");
   const [ack, setAck] = useState(false);
-  return <div><label>Ready for<select value={method} onChange={(event) => setMethod(event.target.value)} data-testid="pack-method-select"><option value="collection">Customer collection</option><option value="delivery">Delivery</option></select></label><HumanAction label="The order is packed and labelled." ack={ack} setAck={setAck} busy={busy} testId="complete-job" onAction={() => action("pack", { method, acknowledged: ack })} /></div>;
+  return <div><label>Ready for<select value={method} onChange={(event) => setMethod(event.target.value)} data-testid="pack-method-select"><option value="collection">Customer collection</option><option value="delivery">Delivery</option></select></label><HumanAction label="The order is packed and labelled." buttonLabel="Complete job" ack={ack} setAck={setAck} busy={busy} testId="complete-job" onAction={() => action("pack", { method, acknowledged: ack })} /></div>;
 }
 
 function Recipes({ recipes, reload, user }) {
@@ -344,7 +436,7 @@ function App() {
   const nav = useMemo(() => [["jobs", "Jobs", FileText], ["recipes", "Recipes", Layers], ["settings", "Shop settings", Settings2]], []);
   if (!auth) return <div className="auth-shell" data-testid="loading-screen"><p>Opening your shop…</p></div>;
   if (!auth.user) return <Auth auth={auth} onSignedIn={(user) => setAuth({ user, needsSetup: false })} />;
-  return <div className="app-shell" data-testid="studio-app"><header className="topbar"><button className="brand" onClick={() => { setView("jobs"); setJob(null); }} data-testid="brand-home-button"><Brand /></button><nav aria-label="Main navigation">{nav.map(([id, label, Icon]) => <button key={id} className={`nav-link ${view === id ? "selected" : ""}`} onClick={() => { setView(id); setJob(null); }} data-testid={`nav-${id}-button`}><Icon size={17} />{label}</button>)}</nav><div className="topbar-right"><button className="icon-button" onClick={() => setTheme(theme === "light" ? "dark" : "light")} data-testid="theme-toggle-button">{theme === "light" ? <Moon /> : <Sun />}</button><button className="text-button" onClick={async () => { await api("auth/logout", { method: "POST", body: "{}" }); setAuth({ user: null, needsSetup: false }); }} data-testid="logout-button"><LogOut size={16} />Sign out</button></div></header>{error && <div className="error-bar" data-testid="global-error"><AlertTriangle />{error}<button className="icon-button" onClick={() => setError("")} data-testid="dismiss-error-button"><X /></button></div>}{view === "jobs" && !job && <main className="jobs-page" data-testid="jobs-page"><div className="page-heading"><div><span className="eyebrow">YOUR PRODUCTION WORKSPACE</span><h1>Jobs</h1><p className="muted">Every order. Every step. A clear next action.</p></div><button className="primary" onClick={() => setNewJob(true)} data-testid="start-job-button"><Plus />Start a job</button></div>{!jobs.length ? <div className="empty-state" data-testid="jobs-empty-state"><FileText size={36} /><h2>Your first great print starts here.</h2><p>Create a business-card job, upload artwork and follow a clear path to an approved proof.</p><button className="primary" onClick={() => setNewJob(true)} data-testid="empty-start-job-button"><Plus />Start a job</button></div> : <div className="job-list">{jobs.map((item) => <button className="job-card" key={item.id} onClick={() => open(item)} data-testid={`job-card-${item.id}`}><div className="product-icon"><FileText /></div><div className="job-card-main"><strong>{item.customer}</strong><p>{item.quantity.toLocaleString()} business cards · {item.sides === 2 ? "Double-sided" : "Single-sided"}</p></div><div className="job-card-status"><Badge status={item.state === "complete" ? "Completed" : item.tasks.find((task) => task.status !== "Completed")?.status || "Completed"} /></div></button>)}</div>}<footer className="page-foot"><ShieldCheck size={15} />Approvals stay tied to the exact production file.</footer></main>}{view === "jobs" && job && <JobView job={job} reload={reloadJob} back={() => { setJob(null); load(); }} />}{view === "recipes" && <Recipes recipes={recipes} reload={load} user={auth.user} />}{view === "settings" && settings && <Settings settings={settings} user={auth.user} reload={load} />}{newJob && <JobModal recipes={recipes} settings={settings} close={() => setNewJob(false)} created={(created) => { setJob(created); setNewJob(false); load(); }} />}</div>;
+  return <div className="app-shell" data-testid="studio-app"><header className="topbar"><button className="brand" onClick={() => { setView("jobs"); setJob(null); }} data-testid="brand-home-button"><Brand /></button><nav aria-label="Main navigation">{nav.map(([id, label, Icon]) => <button key={id} className={`nav-link ${view === id ? "selected" : ""}`} onClick={() => { setView(id); setJob(null); }} data-testid={`nav-${id}-button`}><Icon size={17} />{label}</button>)}</nav><div className="topbar-right"><button className="icon-button" onClick={() => setTheme(theme === "light" ? "dark" : "light")} data-testid="theme-toggle-button">{theme === "light" ? <Moon /> : <Sun />}</button><button className="text-button" onClick={async () => { await api("auth/logout", { method: "POST", body: "{}" }); setAuth({ user: null, needsSetup: false }); }} data-testid="logout-button"><LogOut size={16} />Sign out</button></div></header>{error && <div className="error-bar" data-testid="global-error"><AlertTriangle />{error}<button className="icon-button" onClick={() => setError("")} data-testid="dismiss-error-button"><X /></button></div>}{view === "jobs" && !job && <main className="jobs-page" data-testid="jobs-page"><div className="page-heading"><div><span className="eyebrow">YOUR PRODUCTION WORKSPACE</span><h1>Jobs</h1><p className="muted">Every order. Every step. A clear next action.</p></div><button className="primary" onClick={() => setNewJob(true)} data-testid="start-job-button"><Plus />Start a job</button></div>{!jobs.length ? <div className="empty-state" data-testid="jobs-empty-state"><FileText size={36} /><h2>Your first great print starts here.</h2><p>Create a business-card job, upload artwork and follow a clear path to an approved proof.</p><button className="primary" onClick={() => setNewJob(true)} data-testid="empty-start-job-button"><Plus />Start a job</button></div> : <div className="job-list">{jobs.map((item) => <button className="job-card" key={item.id} onClick={() => open(item)} data-testid={`job-card-${item.id}`}><div className="product-icon"><FileText /></div><div className="job-card-main"><strong>{item.customer}</strong><p>{item.quantity.toLocaleString()} business cards · {item.sides === 2 ? "Double-sided" : "Single-sided"}</p></div><div className="job-card-status"><Badge status={item.state === "complete" ? "Completed" : item.tasks.find((task) => task.status !== "Completed")?.status || "Completed"} /></div></button>)}</div>}<footer className="page-foot"><ShieldCheck size={15} />Approvals stay tied to the exact production file.</footer></main>}{view === "jobs" && job && <JobView job={job} settings={settings} user={auth.user} reload={reloadJob} back={() => { setJob(null); load(); }} />}{view === "recipes" && <Recipes recipes={recipes} reload={load} user={auth.user} />}{view === "settings" && settings && <Settings settings={settings} user={auth.user} reload={load} />}{newJob && <JobModal recipes={recipes} settings={settings} close={() => setNewJob(false)} created={(created) => { setJob(created); setNewJob(false); load(); }} />}</div>;
 }
 
 export default App;

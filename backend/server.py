@@ -1,4 +1,5 @@
 import hmac
+import json
 import os
 import uuid
 from datetime import datetime, timezone
@@ -13,7 +14,7 @@ from starlette.middleware.cors import CORSMiddleware
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
-from p2g.ai import assistant_reply, configured as ai_configured
+from p2g.ai import configured as ai_configured, conversation_events
 from p2g.core import AppError, db, new_id, now
 from p2g.pdfcheck import render_page
 from p2g.workflow import (
@@ -30,11 +31,12 @@ from p2g.workflow import (
     public,
     readiness,
     record_event,
+    recover_interrupted_executions,
     require_admin,
     require_completed,
     require_user,
     reset_from,
-    run_pdf_workflow,
+    process_with_lease,
     save_job,
     session_response,
     tasks,
@@ -94,6 +96,7 @@ async def shop_settings():
 @app.on_event("startup")
 async def startup():
     await ensure_collections()
+    await recover_interrupted_executions()
 
 
 @api.get("/")
@@ -239,11 +242,25 @@ async def update_settings(request: Request):
         "version": current["version"] + 1,
         "updated": now(),
     }
-    await db.settings.replace_one({"_id": "shop"}, {"_id": "shop", **data}, upsert=True)
-    await db.jobs.update_many(
-        {"state": "active", "tasks.12.status": {"$ne": "Completed"}},
-        {"$unset": {"authorization": ""}},
+    changed = any(
+        current.get(key) != data.get(key)
+        for key in ("printer", "stocks", "sides", "instructions")
     )
+    await db.settings.replace_one({"_id": "shop"}, {"_id": "shop", **data}, upsert=True)
+    if changed:
+        affected = await db.jobs.find(
+            {"state": "active", "tasks.12.status": {"$ne": "Completed"}},
+            {"_id": 0},
+        ).to_list(500)
+        for job in affected:
+            if not job.get("route"):
+                continue
+            reset_from(
+                job,
+                8,
+                "Shop settings changed. Choose a route and repeat readiness before authorization.",
+            )
+            await save_job(job)
     return {"ok": True}
 
 
@@ -357,13 +374,33 @@ async def upload_artwork(job_id: str, request: Request, file: UploadFile = File(
 async def process_job(job_id: str, request: Request):
     assert_origin(request)
     user = require_user(await current_user(request))
+    payload = await request.json()
+    result = await process_with_lease(job_id, payload.get("generation"), user["name"])
+    return {"queued": result["queued"], "execution": result["execution"], "job": result["job"]}
+
+
+@api.post("/jobs/{job_id}/control")
+async def control_job(job_id: str, request: Request):
+    assert_origin(request)
+    user = require_user(await current_user(request))
+    payload = await request.json()
+    state = payload.get("state")
+    if state not in {"active", "paused", "cancelled"}:
+        raise AppError("Choose active, paused, or cancelled.", 400)
     job = await get_job(job_id)
     if not job:
         raise AppError("Job not found.", 404)
-    payload = await request.json()
-    if payload.get("generation") != job["generation"]:
-        raise AppError("Artwork version changed. Refresh before continuing.")
-    return await run_pdf_workflow(job, user["name"])
+    if job["state"] == "complete" or job["state"] == "cancelled":
+        raise AppError("This job is closed.")
+    job["state"] = state
+    if state == "cancelled":
+        for task in job["tasks"]:
+            if task["status"] != "Completed":
+                task["status"] = "Cancelled"
+                task["result"] = "Job cancelled. Saved files and completed records were retained."
+    record_event(job, f"Job {('resumed' if state == 'active' else state)}.", user["name"])
+    await save_job(job)
+    return job
 
 
 @api.post("/jobs/{job_id}/action")
@@ -374,6 +411,8 @@ async def job_action(job_id: str, request: Request):
     if not job:
         raise AppError("Job not found.", 404)
     payload = await request.json()
+    if job["state"] != "active":
+        raise AppError(f"This job is {job['state']}. Resume it before making changes.")
     if payload.get("generation") != job["generation"]:
         raise AppError("Job version changed. Refresh before continuing.")
     action = payload.get("action")
@@ -515,17 +554,15 @@ async def chat(job_id: str, request: Request):
     if not job:
         raise AppError("Job not found.", 404)
     message = valid_text((await request.json()).get("message"), "Message", 3000)
-    answer = await assistant_reply(job, message)
-    if not answer:
-        raise AppError("Print2Go Assistant needs server setup. Job buttons remain available.", 503)
-    job.setdefault("messages", []).extend(
-        [
-            {"id": new_id(), "role": "user", "text": message, "at": now()},
-            {"id": new_id(), "role": "assistant", "text": answer, "at": now()},
-        ]
+    async def stream():
+        async for item in conversation_events(job, user, message):
+            yield f"event: {item['event']}\ndata: {json.dumps(item['data'])}\n\n"
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
-    await save_job(job)
-    return {"message": answer}
 
 
 @api.post("/connector")
