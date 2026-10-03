@@ -1,5 +1,6 @@
 import hmac
 import os
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -53,7 +54,20 @@ def error_response(error):
 
 def assert_origin(request):
     origin = request.headers.get("origin")
-    if origin and origin.rstrip("/") != str(request.base_url).rstrip("/"):
+    configured = {
+        value.strip().rstrip("/")
+        for value in os.environ["CORS_ORIGINS"].split(",")
+        if value.strip()
+    }
+    configured.add(str(request.base_url).rstrip("/"))
+    forwarded_host = request.headers.get("x-forwarded-host")
+    forwarded_proto = request.headers.get("x-forwarded-proto", "https")
+    request_host = request.headers.get("host")
+    if forwarded_host:
+        configured.add(f"{forwarded_proto}://{forwarded_host}".rstrip("/"))
+    if request_host:
+        configured.add(f"{forwarded_proto}://{request_host}".rstrip("/"))
+    if origin and origin.rstrip("/") not in configured:
         raise AppError("Request origin is not allowed.", 403)
 
 
@@ -523,6 +537,14 @@ async def connector_heartbeat(request: Request):
     payload = await request.json()
     nonce = valid_text(payload.get("nonce"), "Connector nonce", 100)
     try:
+        uuid.UUID(nonce)
+        timestamp = int(payload.get("timestamp"))
+    except (TypeError, ValueError, AttributeError) as error:
+        raise AppError("Connector nonce or timestamp is invalid.", 400) from error
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    if abs(now_ms - timestamp) > 60_000:
+        raise AppError("Connector clock differs by more than one minute.", 409)
+    try:
         await db.connector_nonces.insert_one({"nonce": nonce, "created": datetime.now(timezone.utc)})
     except Exception as error:
         raise AppError("Connector replay rejected.", 409) from error
@@ -535,6 +557,36 @@ async def connector_heartbeat(request: Request):
         "lastSeen": now(),
     }
     await db.connector_state.replace_one({"_id": "agent"}, {"_id": "agent", **agent}, upsert=True)
+    for handoff in payload.get("handoffs", []):
+        job_id = str(handoff.get("jobId") or "")
+        job = await get_job(job_id)
+        file = latest(job or {}, "PRINT_READY")
+        authorization = (job or {}).get("authorization")
+        matching = (
+            job
+            and file
+            and authorization
+            and handoff.get("sha") == file["sha"]
+            and handoff.get("fileId") == file["id"]
+            and handoff.get("generation") == job["generation"]
+            and authorization.get("generation") == job["generation"]
+        )
+        if not matching:
+            raise AppError("Connector handoff does not match an authorized file.", 409)
+        if not any(item["stage"] == "PRODUCTION_OUTPUT" and item.get("parent") == file["id"] for item in job["files"]):
+            staged = await create_file(
+                job,
+                "PRODUCTION_OUTPUT",
+                await file_bytes(job, file),
+                file,
+                "Connector confirmed exact checksum handoff; this is not proof of printing.",
+            )
+            record_event(
+                job,
+                f"Connector confirmed production file handoff for checksum {staged['sha'][:12]}. "
+                "Physical printing still needs human confirmation.",
+            )
+            await save_job(job)
     candidates = await db.jobs.find({"state": "active"}, {"_id": 0}).to_list(100)
     authorized = []
     for job in candidates:
