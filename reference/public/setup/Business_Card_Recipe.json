@@ -1,0 +1,11 @@
+{
+  "id": "business-card",
+  "version": 1,
+  "name": "Business card",
+  "width": 3.5,
+  "height": 2,
+  "bleed": 0.125,
+  "safe": 0.125,
+  "minDpi": 300,
+  "cutInstructions": "Cut to 3.5 × 2 inches using the verified trim box. Check the first sheet for front/back alignment. Finish to the selected order specification; keep a reference sample."
+}

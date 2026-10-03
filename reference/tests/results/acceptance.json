@@ -1,0 +1,122 @@
+[
+  {
+    "id": "authentication",
+    "status": "PASS",
+    "evidence": "Anonymous job access denied."
+  },
+  {
+    "id": 1,
+    "status": "PASS",
+    "evidence": "Created dad3ee1d-4638-403d-a57e-3917696ac368 through API without chat."
+  },
+  {
+    "id": 2,
+    "status": "PASS",
+    "evidence": "PDF 1b01b803-7ea4-4649-abf1-24786dfd223a, SHA 889f9b1469f2d61a3d6944e1eb61b383bd8a2f0b5cd19ab3b8bc94ddf84a8137, 23221 bytes. Reopened verification passed."
+  },
+  {
+    "id": 6,
+    "status": "PASS",
+    "evidence": "Authenticated proof file endpoint returns the actual two-page generated PDF. Canvas rendering requires browser verification."
+  },
+  {
+    "id": 7,
+    "status": "PASS",
+    "evidence": "Approval records file 1b01b803-7ea4-4649-abf1-24786dfd223a, generation 2, QA operator and timestamp."
+  },
+  {
+    "id": 3,
+    "status": "PASS",
+    "evidence": "Trim-only file stopped for explicit blank-border decision; no output generated before decision."
+  },
+  {
+    "id": 4,
+    "status": "PASS",
+    "evidence": "Incorrect size and unsafe detectable text blocked production; revised-upload recovery recorded."
+  },
+  {
+    "id": 5,
+    "status": "PASS",
+    "evidence": "[{\"pixels\":[60,30],\"placedInches\":[1.6666666666666667,0.5555555555555556],\"dpi\":36}]"
+  },
+  {
+    "id": 8,
+    "status": "PASS",
+    "evidence": "Artwork replacement incremented generation, revoked approval and authorization, reset downstream checks."
+  },
+  {
+    "id": 9,
+    "status": "PASS",
+    "evidence": "New GET preserved job state, lineage and generation from D1/R2."
+  },
+  {
+    "id": 10,
+    "status": "PASS",
+    "evidence": "Claude without credentials returned an honest 503; corrupt PDF produced Failed with recovery details."
+  },
+  {
+    "id": 11,
+    "status": "PASS",
+    "evidence": "Disconnected connector blocked readiness and production authorization."
+  },
+  {
+    "id": 13,
+    "status": "PASS",
+    "evidence": "Print confirmation rejected before readiness and explicit authorization."
+  },
+  {
+    "id": "connector-handoff",
+    "status": "PASS",
+    "evidence": "Authorized PDF checksum matched; handoff acknowledgment created one PRODUCTION_OUTPUT record without marking physical printing complete."
+  },
+  {
+    "id": 14,
+    "status": "PASS",
+    "evidence": "Operator confirmation required for print, cut, QC and pack; rejected QC revoked authorization, rework required authorization again. API fixtures only; no hardware printed."
+  },
+  {
+    "id": 12,
+    "status": "PASS",
+    "evidence": "Concurrent clicks: one lease, one output. Repeated processing and proof approval retain existing evidence."
+  },
+  {
+    "id": "pause-resume",
+    "status": "PASS",
+    "evidence": "Paused job rejects actions; resume restores active state."
+  },
+  {
+    "id": "settings-invalidation",
+    "status": "PASS",
+    "evidence": "Changing production settings reset route/readiness and revoked authorization, preserving the unchanged file proof."
+  },
+  {
+    "id": "interruption-recovery",
+    "status": "PASS",
+    "evidence": "Expired processing lease became a recoverable Failed task; retry resumed from saved state and produced a verified PDF."
+  },
+  {
+    "id": "operator-permissions",
+    "status": "PASS",
+    "evidence": "Operator can sign in but cannot change admin configuration."
+  },
+  {
+    "id": 16,
+    "status": "PASS",
+    "evidence": "Settings responses contain configuration flags only; no Anthropic key or connector secret. Server-only credential code is excluded from client imports."
+  },
+  {
+    "id": 15,
+    "status": "NOT VERIFIED",
+    "evidence": "Responsive light/dark layouts implemented at desktop, tablet and mobile breakpoints. Browser-control skill unavailable; visual browser QA not claimed."
+  },
+  {
+    "id": "Claude live",
+    "status": "NOT VERIFIED",
+    "evidence": "No real Anthropic credentials supplied. Missing-key path was verified."
+  },
+  {
+    "id": "Shop live",
+    "status": "NOT VERIFIED",
+    "evidence": "Local heartbeat protocol tested using isolated QA fixtures. No shop hardware or machine access available."
+  }
+]
