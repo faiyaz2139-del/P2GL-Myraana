@@ -39,7 +39,7 @@
       "check": "create ZZTEST job",
       "status": "PASS",
       "evidence": {
-        "job_id": "0f0d9a60-0568-4077-b9f2-6c0ce875015a"
+        "job_id": "ebde0d4e-efc4-42f1-ac93-8972914afcad"
       }
     },
     {
@@ -60,8 +60,8 @@
       "check": "independent PRINT_READY verification",
       "status": "PASS",
       "evidence": {
-        "file_id": "621f4f11-1ec0-4210-b471-abee582d70e6",
-        "checksum": "2baf56c31ef25747c03c57d00b3df44aabbbce0cf8961dee04c0f6b341ebc9c0"
+        "file_id": "6e6f4bef-22b2-4803-89c3-afafa5f2b119",
+        "checksum": "d4d5fa4269e22eac58513deb19014fbbd941f3301f1fd0458d917d3858bee0f1"
       }
     },
     {
@@ -69,8 +69,8 @@
       "status": "PASS",
       "evidence": {
         "http": 200,
-        "file_id": "621f4f11-1ec0-4210-b471-abee582d70e6",
-        "checksum": "2baf56c31ef25747c03c57d00b3df44aabbbce0cf8961dee04c0f6b341ebc9c0"
+        "file_id": "6e6f4bef-22b2-4803-89c3-afafa5f2b119",
+        "checksum": "d4d5fa4269e22eac58513deb19014fbbd941f3301f1fd0458d917d3858bee0f1"
       }
     },
     {
@@ -109,6 +109,31 @@
       }
     },
     {
+      "check": "disconnected shop stops production for connector reason",
+      "status": "PASS",
+      "evidence": {
+        "last": {
+          "job_id": "ebde0d4e-efc4-42f1-ac93-8972914afcad",
+          "agent": "production",
+          "status": "STOP",
+          "next_agent": "production",
+          "summary": "Shop connector is not ready.",
+          "data": {},
+          "warnings": [],
+          "stop_reasons": [
+            "Disconnected or stale connector."
+          ]
+        }
+      }
+    },
+    {
+      "check": "reconnect simulated connector",
+      "status": "PASS",
+      "evidence": {
+        "http": 200
+      }
+    },
+    {
       "check": "forged agent state ignored",
       "status": "PASS",
       "evidence": {
@@ -119,9 +144,9 @@
       "check": "QC never completes without operator confirmation",
       "status": "PASS",
       "evidence": {
-        "execution": "9c595d69-7bc7-43db-87ab-5f4a488f0fe8",
+        "execution": "62e891a0-acf7-40a6-9ee3-1c0070f56093",
         "last": {
-          "job_id": "0f0d9a60-0568-4077-b9f2-6c0ce875015a",
+          "job_id": "ebde0d4e-efc4-42f1-ac93-8972914afcad",
           "agent": "qc",
           "status": "STOP",
           "next_agent": "qc",
@@ -135,10 +160,17 @@
       }
     },
     {
+      "check": "QC positive completion after real operator confirmation",
+      "status": "NOT TESTED",
+      "evidence": {
+        "reason": "A non-printing integration test must not fabricate the required physical print/cut stages before the real operator QC endpoint."
+      }
+    },
+    {
       "check": "duplicate agent evaluation idempotent",
       "status": "PASS",
       "evidence": {
-        "execution": "9c595d69-7bc7-43db-87ab-5f4a488f0fe8",
+        "execution": "62e891a0-acf7-40a6-9ee3-1c0070f56093",
         "event_count": 8
       }
     },
@@ -158,11 +190,11 @@
       }
     },
     {
-      "check": "disconnected shop stops production",
+      "check": "changed artwork stops production without reapproval",
       "status": "PASS",
       "evidence": {
         "last": {
-          "job_id": "0f0d9a60-0568-4077-b9f2-6c0ce875015a",
+          "job_id": "ebde0d4e-efc4-42f1-ac93-8972914afcad",
           "agent": "production",
           "status": "STOP",
           "next_agent": "production",
@@ -202,7 +234,7 @@
     }
   ],
   "summary": {
-    "pass": 24,
+    "pass": 26,
     "fail": 0
   }
 }

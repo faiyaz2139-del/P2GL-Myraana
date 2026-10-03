@@ -67,6 +67,11 @@ Myraana and never send a print command or claim physical production completed.
   endpoint checks and the supplied agent suite completed 10/10. The test backend
   was stopped, `p2g_integration_test` was dropped, and the live preview stayed in
   first-run state. The independent regression review reported no issues.
+- PASS: corrected connector ordering in the isolated agent runner completed
+  26 PASS / 0 FAIL. It proves a Production-agent STOP with the exact
+  `Disconnected or stale connector.` reason before artwork replacement. Positive
+  QC completion remains explicitly NOT TESTED because no physical operator stages
+  were fabricated.
 - NOT VERIFIED: live connector/hardware, direct Anthropic/OpenAI credentials, and
   live custom-domain routing.
 - FAIL (honestly blocked): managed LLM tool-call probe returned a provider-side

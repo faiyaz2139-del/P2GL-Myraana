@@ -278,6 +278,32 @@ class IntegrationRun:
                 self.latest_job()
 
         def evaluate_qc_and_forgery():
+            asyncio.run(self.disconnect_shop())
+            disconnected = self.request("POST", f"/jobs/{self.job_id}/agents/evaluate")
+            disconnected_data = disconnected.json() if disconnected.ok else {}
+            disconnected_last = (disconnected_data.get("results") or [{}])[-1]
+            self.record(
+                "disconnected shop stops production for connector reason",
+                disconnected.status_code == 200
+                and disconnected_last.get("agent") == "production"
+                and disconnected_last.get("status") == "STOP"
+                and "Disconnected or stale connector." in disconnected_last.get("stop_reasons", []),
+                last=disconnected_last,
+            )
+            response = requests.post(
+                f"{BASE}/connector",
+                headers={"Authorization": "Bearer zztest-isolated-connector-only"},
+                json={
+                    "timestamp": int(time.time() * 1000),
+                    "nonce": str(uuid.uuid4()),
+                    "destination": "/tmp/zztest-no-print",
+                    "writable": True,
+                    "capabilities": ["pdf-hot-folder"],
+                    "handoffs": [],
+                },
+                timeout=60,
+            )
+            self.record("reconnect simulated connector", response.status_code == 200, http=response.status_code)
             forged = self.request(
                 "POST",
                 f"/jobs/{self.job_id}/agents/evaluate",
@@ -292,6 +318,15 @@ class IntegrationRun:
                 first.status_code == 200 and last.get("agent") == "qc" and last.get("status") == "STOP",
                 execution=first_data.get("execution"),
                 last=last,
+            )
+            self.results.append(
+                {
+                    "check": "QC positive completion after real operator confirmation",
+                    "status": "NOT TESTED",
+                    "evidence": {
+                        "reason": "A non-printing integration test must not fabricate the required physical print/cut stages before the real operator QC endpoint.",
+                    },
+                }
             )
             second = self.request("POST", f"/jobs/{self.job_id}/agents/evaluate")
             second_data = second.json() if second.ok else {}
@@ -318,12 +353,11 @@ class IntegrationRun:
             )
             response = self.request("POST", f"/jobs/{self.job_id}/process", json={"generation": self.job["generation"]})
             self.record("changed artwork verified PRINT_READY", response.status_code == 200, http=response.status_code)
-            asyncio.run(self.disconnect_shop())
             response = self.request("POST", f"/jobs/{self.job_id}/agents/evaluate")
             data = response.json() if response.ok else {}
             last = (data.get("results") or [{}])[-1]
             self.record(
-                "disconnected shop stops production",
+                "changed artwork stops production without reapproval",
                 response.status_code == 200 and last.get("agent") == "production" and last.get("status") == "STOP",
                 last=last,
             )
