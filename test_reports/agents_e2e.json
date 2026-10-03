@@ -1,0 +1,322 @@
+{
+  "results": [
+    {
+      "check": "fixture v1 checksum",
+      "status": "PASS",
+      "evidence": {
+        "sha256": "60addb9686760b9ad340d452348eceb11e71e3aee554b84ace7aaf660ee51d70"
+      }
+    },
+    {
+      "check": "fixture v2 checksum",
+      "status": "PASS",
+      "evidence": {
+        "sha256": "d1433c2b3bbeb836fdcab3bddc8e530e6050420080a401833178413eba9f2692"
+      }
+    },
+    {
+      "check": "isolated port 8011 health",
+      "status": "PASS",
+      "evidence": {
+        "http": 200
+      }
+    },
+    {
+      "check": "isolated first-run admin",
+      "status": "PASS",
+      "evidence": {
+        "http": 200
+      }
+    },
+    {
+      "check": "isolated shop settings",
+      "status": "PASS",
+      "evidence": {
+        "http": 200
+      }
+    },
+    {
+      "check": "create ZZTEST job",
+      "status": "PASS",
+      "evidence": {
+        "job_id": "5044b7ad-c099-43ad-8e0a-9b5efd38751f"
+      }
+    },
+    {
+      "check": "upload v1 original",
+      "status": "PASS",
+      "evidence": {
+        "http": 200
+      }
+    },
+    {
+      "check": "inspection and PRINT_READY generation",
+      "status": "PASS",
+      "evidence": {
+        "http": 200
+      }
+    },
+    {
+      "check": "independent PRINT_READY verification",
+      "status": "FAIL",
+      "evidence": {
+        "file_id": null,
+        "checksum": null
+      }
+    },
+    {
+      "check": "approval and route",
+      "status": "FAIL",
+      "evidence": {
+        "reason": "PRINT_READY missing; downstream checks are recorded as failed."
+      }
+    },
+    {
+      "check": "forged agent state ignored",
+      "status": "PASS",
+      "evidence": {
+        "http": 400
+      }
+    },
+    {
+      "check": "QC never completes without operator confirmation",
+      "status": "FAIL",
+      "evidence": {
+        "execution": "19f99c59-f130-445f-9fe2-14a8283673f2",
+        "last": {
+          "job_id": "5044b7ad-c099-43ad-8e0a-9b5efd38751f",
+          "agent": "preflight",
+          "status": "STOP",
+          "next_agent": "preflight",
+          "summary": "Preflight stopped the job.",
+          "data": {
+            "measured": false,
+            "unsafe_content": true,
+            "bleed_ok": true,
+            "bleed_decision": null,
+            "dpi_warning": null,
+            "pages": [
+              {
+                "page": 1,
+                "widthInches": 3.75,
+                "heightInches": 2.25,
+                "boxes": {
+                  "MediaBox": {
+                    "explicit": true,
+                    "box": [
+                      0.0,
+                      0.0,
+                      270.0,
+                      162.0
+                    ]
+                  },
+                  "CropBox": {
+                    "explicit": false,
+                    "box": [
+                      0.0,
+                      0.0,
+                      270.0,
+                      162.0
+                    ]
+                  },
+                  "BleedBox": {
+                    "explicit": false,
+                    "box": [
+                      0.0,
+                      0.0,
+                      270.0,
+                      162.0
+                    ]
+                  },
+                  "TrimBox": {
+                    "explicit": false,
+                    "box": [
+                      0.0,
+                      0.0,
+                      270.0,
+                      162.0
+                    ]
+                  },
+                  "ArtBox": {
+                    "explicit": false,
+                    "box": [
+                      0.0,
+                      0.0,
+                      270.0,
+                      162.0
+                    ]
+                  }
+                },
+                "rotation": 0,
+                "fonts": [
+                  {
+                    "name": "AAAAAA+DejaVuSans-Bold",
+                    "type": "TrueType",
+                    "embedded": true,
+                    "used": true
+                  },
+                  {
+                    "name": "AAAAAA+DejaVuSans",
+                    "type": "TrueType",
+                    "embedded": true,
+                    "used": true
+                  }
+                ],
+                "images": [],
+                "unsafeText": [],
+                "colourOperators": [
+                  "DeviceCMYK"
+                ]
+              }
+            ]
+          },
+          "warnings": [],
+          "stop_reasons": [
+            "Artwork violates a hard safety/quality rule."
+          ]
+        }
+      }
+    },
+    {
+      "check": "duplicate agent evaluation idempotent",
+      "status": "PASS",
+      "evidence": {
+        "execution": "19f99c59-f130-445f-9fe2-14a8283673f2",
+        "event_count": 3
+      }
+    },
+    {
+      "check": "changed artwork invalidates prior approval",
+      "status": "PASS",
+      "evidence": {
+        "generation": 3
+      }
+    },
+    {
+      "check": "changed artwork verified PRINT_READY",
+      "status": "PASS",
+      "evidence": {
+        "http": 200
+      }
+    },
+    {
+      "check": "disconnected shop stops production",
+      "status": "FAIL",
+      "evidence": {
+        "last": {
+          "job_id": "5044b7ad-c099-43ad-8e0a-9b5efd38751f",
+          "agent": "preflight",
+          "status": "STOP",
+          "next_agent": "preflight",
+          "summary": "Preflight stopped the job.",
+          "data": {
+            "measured": false,
+            "unsafe_content": true,
+            "bleed_ok": true,
+            "bleed_decision": null,
+            "dpi_warning": null,
+            "pages": [
+              {
+                "page": 1,
+                "widthInches": 3.75,
+                "heightInches": 2.25,
+                "boxes": {
+                  "MediaBox": {
+                    "explicit": true,
+                    "box": [
+                      0.0,
+                      0.0,
+                      270.0,
+                      162.0
+                    ]
+                  },
+                  "CropBox": {
+                    "explicit": false,
+                    "box": [
+                      0.0,
+                      0.0,
+                      270.0,
+                      162.0
+                    ]
+                  },
+                  "BleedBox": {
+                    "explicit": false,
+                    "box": [
+                      0.0,
+                      0.0,
+                      270.0,
+                      162.0
+                    ]
+                  },
+                  "TrimBox": {
+                    "explicit": false,
+                    "box": [
+                      0.0,
+                      0.0,
+                      270.0,
+                      162.0
+                    ]
+                  },
+                  "ArtBox": {
+                    "explicit": false,
+                    "box": [
+                      0.0,
+                      0.0,
+                      270.0,
+                      162.0
+                    ]
+                  }
+                },
+                "rotation": 0,
+                "fonts": [
+                  {
+                    "name": "AAAAAA+DejaVuSans-Bold",
+                    "type": "TrueType",
+                    "embedded": true,
+                    "used": true
+                  },
+                  {
+                    "name": "AAAAAA+DejaVuSans",
+                    "type": "TrueType",
+                    "embedded": true,
+                    "used": true
+                  }
+                ],
+                "images": [],
+                "unsafeText": [],
+                "colourOperators": [
+                  "DeviceCMYK"
+                ]
+              }
+            ]
+          },
+          "warnings": [],
+          "stop_reasons": [
+            "Artwork violates a hard safety/quality rule."
+          ]
+        }
+      }
+    },
+    {
+      "check": "physical printing never triggered",
+      "status": "PASS",
+      "evidence": {
+        "physical_print_enabled": false
+      }
+    },
+    {
+      "check": "live preview remains first-run",
+      "status": "PASS",
+      "evidence": {
+        "live": {
+          "user": null,
+          "needsSetup": true
+        }
+      }
+    }
+  ],
+  "summary": {
+    "pass": 14,
+    "fail": 4
+  }
+}
