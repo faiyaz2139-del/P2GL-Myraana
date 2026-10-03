@@ -142,9 +142,12 @@
     },
     {
       "criterion": "14 Settings change resets route, readiness, and authorization gates",
-      "status": "NOT VERIFIED",
+      "status": "PASS",
       "evidence": {
-        "reason": "Implementation added reset logic; no additional full settings mutation run was performed in this focused audit."
+        "report": "iteration_6.json",
+        "assertions": "5/5",
+        "readinessCleared": true,
+        "proofApprovalPreserved": true
       }
     },
     {
@@ -165,8 +168,8 @@
     }
   ],
   "summary": {
-    "pass": 14,
+    "pass": 15,
     "fail": 0,
-    "notVerified": 2
+    "notVerified": 1
   }
 }

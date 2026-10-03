@@ -56,6 +56,10 @@ Myraana and never send a print command or claim physical production completed.
 - PASS: focused isolated lease/pause/unconfigured-assistant assertion and an
   independent 4/4 desktop/mobile assistant+proof regression. The QA database was
   deleted and the production preview was restored empty after the checks.
+- PASS: independent settings-mutation regression (8/8) plus stale-readiness
+  cleanup verification (5/5). Changing shop settings preserves the unchanged
+  verified proof approval while revoking route, readiness, authorization, and
+  downstream route tasks. The isolated QA database was deleted afterward.
 - NOT VERIFIED: live connector/hardware, direct Anthropic/OpenAI credentials, and
   live custom-domain routing.
 - FAIL (honestly blocked): managed LLM tool-call probe returned a provider-side

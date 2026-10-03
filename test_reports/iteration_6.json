@@ -1,0 +1,29 @@
+{
+  "summary": "Read-only post-backfill verification on the isolated Settings QA job. All 5 pytest assertions PASS (5/5, 100%). The stale job.readiness snapshot was successfully cleared by the one-time $unset backfill, and all other invariants are preserved as required.",
+  "scope": "Backend only, read-only. Login + GET /api/jobs + GET /api/jobs/{id}. No mutations, no actions, no settings/connector/AI/hardware calls.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "regression_results": {
+    "readiness_absent": "PASS (job.readiness is now absent)",
+    "print_ready_preserved": "PASS (PRINT_READY file + sha retained)",
+    "approval_generation_matches": "PASS (approval.generation == job.generation; approval.sha == current PRINT_READY sha)",
+    "route_absent": "PASS",
+    "authorization_absent": "PASS"
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_readiness_cleanup_regression.py",
+    "/app/test_reports/pytest/readiness_cleanup_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "workflow.py reset_from() correctly pops job['readiness'] alongside route (index<=8). The one-time $unset backfill cleaned the single pre-existing stale document. No further action required."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (5/5)"},
+  "test_credentials": "QA account qa@print2go.test used for login only; not persisted.",
+  "seed_data_creation": "None. No mutations.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Readiness cleanup verification is complete and green. The isolated QA job (p2g_settings_audit_qa DB) now satisfies all five invariants: readiness absent, PRINT_READY preserved, approval.generation == job.generation with matching sha, route absent, authorization absent. The reset_from() fix at workflow.py:133 plus the one-time $unset backfill fully resolve the stale-snapshot issue reported in iteration_5.",
+  "rca_of_the_issue": "Root cause (resolved): stale job.readiness persisted on a job that was reset before the reset_from() cleanup line was added. Resolution: (1) code fix in workflow.py reset_from() pops 'readiness' on index<=8 resets going forward; (2) one-time $unset backfill removed the single pre-existing stale snapshot on the isolated QA DB. Verified green by test_readiness_cleanup_regression.py (5/5)."
+}
