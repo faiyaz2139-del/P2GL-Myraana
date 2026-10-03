@@ -47,6 +47,9 @@ Myraana and never send a print command or claim physical production completed.
   `/setup/releases/`. Criterion 16 records the credential-like build-transcript
   incident as unresolved; its real/sample classification and any rotation action
   require platform security investigation.
+- Static release-link regression passed: all seven published preview artifacts
+  returned HTTP 200, the published source ZIP checksum matched, and the ZIP had
+  no `.env` or `test_credentials.md` entries.
 - NOT VERIFIED: live connector/hardware, direct Anthropic/OpenAI credentials, and
   live custom-domain routing.
 - FAIL (honestly blocked): managed LLM tool-call probe returned a provider-side

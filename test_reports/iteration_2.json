@@ -1,0 +1,36 @@
+{
+  "summary": "Narrow static-artifact regression. Verified all 7 preview URLs under /setup/releases/ return HTTP 200 with correct content-types, SHA256 matches the published hash, and the sanitized ZIP (95 entries) contains no .env or test_credentials.md files. No app, auth, API, or workflow actions were performed per scope.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "static_artifact_verification": {
+    "base_url": "https://p2g-production.preview.emergentagent.com/setup/releases",
+    "results": [
+      {"path": "/Print2Go_Production_Studio_sanitized.zip", "status": 200, "size": 306488, "content_type": "application/zip"},
+      {"path": "/qa_acceptance_report.json", "status": 200, "size": 4515, "content_type": "application/json"},
+      {"path": "/qa_regression_assertion_report.json", "status": 200, "size": 2258, "content_type": "application/json"},
+      {"path": "/qa_desktop_job_proof.jpeg", "status": 200, "size": 37749, "content_type": "image/jpeg"},
+      {"path": "/qa_mobile_job_proof.jpeg", "status": 200, "size": 23068, "content_type": "image/jpeg"},
+      {"path": "/DOMAIN_TRANSFER.md", "status": 200, "size": 1402, "content_type": "text/markdown"},
+      {"path": "/Print2Go_Production_Studio_sanitized.zip.sha256", "status": 200, "size": 65, "content_type": "application/octet-stream"}
+    ],
+    "sha256_published": "d6bb7ad5c4b4e87c21f9cee70f07994d9cf7c23882fa067f4d5e4ce9627b31ce",
+    "sha256_computed": "d6bb7ad5c4b4e87c21f9cee70f07994d9cf7c23882fa067f4d5e4ce9627b31ce",
+    "sha256_match": true,
+    "zip_entry_count": 95,
+    "zip_contains_forbidden_entries": false,
+    "forbidden_patterns_checked": [".env", "test_credentials.md"]
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (out of scope)", "frontend": "100% (7/7 static URLs)"},
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "This iteration only validated static artifacts under /setup/releases per narrow scope. The app behavior, auth, APIs, and DB were deliberately not tested."
+}
