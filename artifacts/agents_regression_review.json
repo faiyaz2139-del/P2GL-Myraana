@@ -1,0 +1,14 @@
+{
+  "summary": "Deterministic agent regression review. Verified /app/test_reports/agents_e2e.json contains 24 PASS / 0 FAIL with all required evidence (fixture v1 & v2 sha256 checksums, approval-before-V2 invalidation with generation=3, duplicate agent evaluation idempotency with event_count=8, disconnected production STOP + no approved production file reasons, forged agent state HTTP 400, QC HTTP 409 without operator confirmation, live preview needsSetup=true first-run). Ran PYTHONPATH=/app/backend pytest -q tests/test_agents.py => 10 passed in 0.53s. Confirmed GET http://localhost:8001/api/auth => {\"user\":null,\"needsSetup\":true}. No servers started, no users created, no DB mutations.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": ["/app/test_reports/agents_e2e.json", "/app/backend/tests/test_agents.py"],
+  "action_items": [],
+  "critical_code_review_comments": [],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "N/A (skipped per request)"},
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Narrow deterministic regression. agents_e2e.json verifies 24/24 PASS. pytest tests/test_agents.py => 10/10 PASS. /api/auth returns needsSetup=true (first-run preserved). No further action required."
+}

@@ -63,6 +63,10 @@ Myraana and never send a print command or claim physical production completed.
 - PASS: focused operator recovery regression (6/6). Rejected final QC exposes
   protected rework and returns to human reauthorization; readiness recovery
   exposes Connect shop and retry readiness without artwork-upload drift.
+- PASS: deterministic multi-agent integration runner completed 24/24 isolated
+  endpoint checks and the supplied agent suite completed 10/10. The test backend
+  was stopped, `p2g_integration_test` was dropped, and the live preview stayed in
+  first-run state. The independent regression review reported no issues.
 - NOT VERIFIED: live connector/hardware, direct Anthropic/OpenAI credentials, and
   live custom-domain routing.
 - FAIL (honestly blocked): managed LLM tool-call probe returned a provider-side
