@@ -50,6 +50,12 @@ Myraana and never send a print command or claim physical production completed.
 - Static release-link regression passed: all seven published preview artifacts
   returned HTTP 200, the published source ZIP checksum matched, and the ZIP had
   no `.env` or `test_credentials.md` entries.
+- Audit update: restored the source-style job assistant workspace, server-only
+  direct-provider adapters, durable processing execution leases, pause/resume/
+  cancel controls, step execution references, and settings-route invalidation.
+- PASS: focused isolated lease/pause/unconfigured-assistant assertion and an
+  independent 4/4 desktop/mobile assistant+proof regression. The QA database was
+  deleted and the production preview was restored empty after the checks.
 - NOT VERIFIED: live connector/hardware, direct Anthropic/OpenAI credentials, and
   live custom-domain routing.
 - FAIL (honestly blocked): managed LLM tool-call probe returned a provider-side

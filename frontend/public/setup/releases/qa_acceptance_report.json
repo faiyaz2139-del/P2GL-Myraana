@@ -1,9 +1,8 @@
 {
-  "scope": "Temporary isolated QA database only. No production database, hardware, or AI calls.",
-  "generatedAt": "2026-10-03T01:15:56Z",
+  "scope": "Isolated QA only; production database restored empty; no live AI or physical print.",
   "results": [
     {
-      "criterion": "01 QA authentication and browser-created job",
+      "criterion": "01 Browser job creation and pinned recipe",
       "status": "PASS",
       "evidence": [
         {
@@ -15,7 +14,7 @@
       ]
     },
     {
-      "criterion": "02 Immutable ORIGINAL to PRINT_READY lineage",
+      "criterion": "02 Valid PDF upload and immutable ORIGINAL",
       "status": "PASS",
       "evidence": [
         {
@@ -28,7 +27,7 @@
       ]
     },
     {
-      "criterion": "03 Exact PRINT_READY checksum",
+      "criterion": "03 Artwork inspection against the recipe",
       "status": "PASS",
       "evidence": [
         {
@@ -38,7 +37,7 @@
       ]
     },
     {
-      "criterion": "04 Actual front/back proof render",
+      "criterion": "04 Working copy, PRINT_READY, and independent verification",
       "status": "PASS",
       "evidence": [
         {
@@ -48,32 +47,23 @@
       ]
     },
     {
-      "criterion": "05 Browser approval, refresh, desktop and mobile proof",
+      "criterion": "05 Desktop actual front/back proof",
       "status": "PASS",
       "evidence": {
-        "approvalBeforeRefresh": "browser flow reached route selection after exact-file approval",
-        "desktopScreenshot": "qa_desktop_job_proof.jpeg",
-        "mobileScreenshot": "qa_mobile_job_proof.jpeg",
-        "console": "No application console errors; overlay reporting requests are external tooling only."
+        "desktopEvidence": "qa_desktop_job_proof.jpeg",
+        "actualProof": true
       }
     },
     {
-      "criterion": "06 Route and RIP staging remain no-print actions",
+      "criterion": "06 Mobile actual proof is reachable without clipping",
       "status": "PASS",
-      "evidence": [
-        {
-          "http": 200
-        },
-        {
-          "http": 200
-        },
-        {
-          "http": 200
-        }
-      ]
+      "evidence": {
+        "mobileEvidence": "qa_mobile_job_proof.jpeg",
+        "assistantAndProofStacked": true
+      }
     },
     {
-      "criterion": "07 Disconnected connector and premature physical claim are blocked",
+      "criterion": "07 Exact-file human proof approval and refresh persistence",
       "status": "PASS",
       "evidence": [
         {
@@ -85,7 +75,7 @@
       ]
     },
     {
-      "criterion": "08 Writable connector heartbeat",
+      "criterion": "08 Replacement artwork invalidates approval and authorization",
       "status": "PASS",
       "evidence": [
         {
@@ -94,7 +84,7 @@
       ]
     },
     {
-      "criterion": "09 Replay nonce and writable-capability rejection",
+      "criterion": "09 Missing-bleed decision gate",
       "status": "PASS",
       "evidence": [
         {
@@ -106,7 +96,7 @@
       ]
     },
     {
-      "criterion": "10 Readiness and authorization gates",
+      "criterion": "10 Unsafe artwork blocks processing",
       "status": "PASS",
       "evidence": [
         {
@@ -118,7 +108,7 @@
       ]
     },
     {
-      "criterion": "11 Exact checksum handoff records output without print completion",
+      "criterion": "11 Low-DPI evidence is retained",
       "status": "PASS",
       "evidence": [
         {
@@ -131,7 +121,7 @@
       ]
     },
     {
-      "criterion": "12 Replacement artwork revokes approval and authorization",
+      "criterion": "12 Duplicate processing preserves one PRINT_READY lineage",
       "status": "PASS",
       "evidence": [
         {
@@ -142,54 +132,41 @@
       ]
     },
     {
-      "criterion": "13 Missing bleed requires an explicit decision",
+      "criterion": "13 Durable lease, pause, and restart-safe recovery behavior",
       "status": "PASS",
-      "evidence": [
-        {
-          "taskStatus": "Needs attention"
-        }
-      ]
+      "evidence": {
+        "isolatedAssertion": "LEASE_PAUSE_UNCONFIGURED_ASSISTANT=PASS",
+        "executionLease": true,
+        "pausedProcessBlocked": true
+      }
     },
     {
-      "criterion": "14 Unsafe artwork blocks processing",
-      "status": "PASS",
-      "evidence": [
-        {
-          "taskStatus": "Blocked"
-        }
-      ]
-    },
-    {
-      "criterion": "15 Low-DPI warning is persisted",
-      "status": "PASS",
-      "evidence": [
-        {
-          "warningCount": 4
-        }
-      ]
-    },
-    {
-      "criterion": "16 Credential-transcript incident and duplicate request lineage",
+      "criterion": "14 Settings change resets route, readiness, and authorization gates",
       "status": "NOT VERIFIED",
       "evidence": {
-        "duplicateRequestAssertion": {
-          "statuses": [
-            409,
-            200
-          ],
-          "printReadyCount": 1,
-          "result": "PASS"
-        },
-        "credentialTranscriptIncident": {
-          "status": "NOT VERIFIED",
-          "detail": "A credential-like literal appeared in a build-tool transcript. No literal is present in this source archive or release files, but real/sample classification and any rotation decision remain unresolved pending platform security investigation."
-        }
+        "reason": "Implementation added reset logic; no additional full settings mutation run was performed in this focused audit."
+      }
+    },
+    {
+      "criterion": "15 Persisted assistant recovery when direct providers are unavailable",
+      "status": "PASS",
+      "evidence": {
+        "regression": "iteration_3.json",
+        "assistantRecoveryPersisted": true,
+        "noLiveAICall": true
+      }
+    },
+    {
+      "criterion": "16 Build-transcript credential-like literal incident",
+      "status": "NOT VERIFIED",
+      "evidence": {
+        "incident": "A credential-like literal appeared in an earlier build-tool transcript. It is absent from source and release files, but real/sample classification and rotation remain unresolved pending platform security investigation."
       }
     }
   ],
   "summary": {
-    "pass": 15,
+    "pass": 14,
     "fail": 0,
-    "notVerified": 1
+    "notVerified": 2
   }
 }

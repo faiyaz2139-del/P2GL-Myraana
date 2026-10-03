@@ -1,0 +1,55 @@
+{
+  "summary": "Narrow regression on Print2Go assistant visibility (desktop + mobile), honest unconfigured recovery, and pause control visibility against isolated QA DB. All 4 scoped checks passed. No AI calls were made and no physical production actions were taken.",
+  "scope": "Frontend only; one existing QA job; sign in → open job → verify assistant/proof on desktop and mobile → send one assistant message → verify unconfigured recovery persisted → verify pause button visible (not clicked).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "regression_results": {
+    "1_desktop_assistant_and_proof": {
+      "viewport": "1440x900",
+      "job_count": 1,
+      "assistant_panel_visible": true,
+      "assistant_bounding_box": {"x": 0, "y": 145, "width": 330, "height": 755},
+      "production_proof_visible": true,
+      "print_ready_sha_line": "SHA-256 66ae3f0c4d174dbd942ea027e5de91c40920b60befa1e1b92b4e574c99f277f4",
+      "status": "PASS"
+    },
+    "2_mobile_stacked_assistant_and_proof": {
+      "viewport": "390x844",
+      "assistant_panel_visible": true,
+      "split_workspace_flex_direction": "column",
+      "assistant_bounding_box_width": 390,
+      "unconfigured_notice_visible": true,
+      "production_proof_reachable_on_scroll": true,
+      "status": "PASS"
+    },
+    "3_assistant_unconfigured_recovery": {
+      "message_sent": "Can you confirm the current job state?",
+      "assistant_error_text": "Assistant setup is unavailable. Continue with the guarded job controls.",
+      "streaming_message_shown": false,
+      "unconfigured_notice_shown": true,
+      "message_history_includes_recovery_text": true,
+      "recovery_persisted_after_reload": true,
+      "claims_ai_availability": false,
+      "status": "PASS"
+    },
+    "4_pause_control_visible": {
+      "pause_button_visible_desktop": true,
+      "pause_button_visible_mobile": true,
+      "clicked": false,
+      "status": "PASS"
+    }
+  },
+  "test_credentials": "Supplied by main agent (disposable QA account against p2g_ui_audit_qa). Not persisted to artifacts.",
+  "updated_files": [],
+  "action_items": [],
+  "critical_code_review_comments": [],
+  "success_rate": {"backend": "N/A (skipped per scope)", "frontend": "100% (4/4 regression checks)"},
+  "seed_data_creation": "None (used existing single QA job 'QA Assistant Proof' already seeded).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Isolated QA DB p2g_ui_audit_qa holds one job (customer: 'QA Assistant Proof', 500 cards double-sided, recipe v1, step 8/16 Review and approve proof). Assistant has no provider key configured; backend returns the honest recovery message 'Assistant setup is unavailable. Continue with the guarded job controls.' both inline (assistant-error) and persisted into the conversation history. Split-workspace is CSS flex column at mobile width so the assistant stacks above the main job panel; proof section is reachable via scroll on mobile. Pause button is present in the job toolbar for active jobs on both breakpoints."
+}
