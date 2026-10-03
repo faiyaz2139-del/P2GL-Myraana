@@ -1,0 +1,10 @@
+{
+  "result": "PASS",
+  "jobIdRedacted": "6ab3cd23",
+  "proofApprovalPreserved": true,
+  "routeRevoked": true,
+  "readinessRevoked": true,
+  "authorizationRevoked": true,
+  "oldActionRejected": 409,
+  "oldConnectorHandoffRejected": 409
+}

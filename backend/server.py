@@ -260,6 +260,15 @@ async def update_settings(request: Request):
                 8,
                 "Shop settings changed. Choose a route and repeat readiness before authorization.",
             )
+            if job.get("approval"):
+                job["approval"]["generation"] = job["generation"]
+            if job.get("verification"):
+                job["verification"]["generation"] = job["generation"]
+            record_event(
+                job,
+                "Verified proof approval retained because the production PDF did not change; "
+                "route, readiness, and authorization were revoked.",
+            )
             await save_job(job)
     return {"ok": True}
 
