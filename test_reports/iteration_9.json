@@ -1,0 +1,21 @@
+{
+  "summary": "Narrow branding shell regression (frontend-only, unauthenticated). Verified index.html: <title>Print2Go Production Studio</title>, meta description 'Print2Go Production Studio', favicon <link rel=icon> -> %PUBLIC_URL%/print2go-mark.svg, theme-color #245cce, no analytics/branding script (only a benign PerformanceServerTiming DataCloneError suppressor remains). Confirmed /app/frontend/public/print2go-mark.svg exists (5-line inline SVG mark, brand blue #245cce). Case-insensitive grep for 'emergent' and 'posthog' across frontend/public and frontend/src returned ZERO user-visible occurrences. testIds/auth.js and testIds/home.js reviewed — kebab-case feature-prefixed values, no leftover emergent references. Live preview shell GET https://p2g-production.preview.emergentagent.com rendered correctly: document.title === 'Print2Go Production Studio', link[rel=icon].href === '.../print2go-mark.svg', visible UI shows only Print2Go wordmark/logo and the Set-up-your-shop first-run form. The 56 'emergent' substrings observed in the live rendered HTML all originate from the platform-injected /__emergent_overlay__/ dev-preview error overlay script (data-emergent-overlay) served by the preview ingress — this is NOT emitted by the application source and is stripped from production builds. No authentication performed, no data created, no files modified.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Dev-preview overlay script (/__emergent_overlay__/recorder.js and inline data-emergent-overlay script) is injected by the Emergent preview ingress at runtime. It is not present in app source and does not ship to production. No action required for branding cleanup."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (skipped per request)", "frontend": "100% (branding shell verified)"},
+  "test_credentials": "Not used — unauthenticated shell check only.",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Branding cleanup verified end-to-end at the shell level. Source has zero 'emergent'/'posthog' occurrences in frontend/public and frontend/src. Title='Print2Go Production Studio', favicon=print2go-mark.svg (inline SVG, brand blue #245cce). Any 'emergent' strings in rendered HTML come from the platform /__emergent_overlay__/ dev script and are out of scope. REACT_APP_BACKEND_URL legitimately points to *.preview.emergentagent.com (protected variable) and must not be changed."
+}
