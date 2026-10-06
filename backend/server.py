@@ -1,6 +1,7 @@
 import hmac
 import json
 import os
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -103,6 +104,19 @@ async def startup():
 @api.get("/")
 async def health():
     return {"name": "Print2Go Production Studio", "status": "ready"}
+
+
+@api.get("/build-info")
+async def build_info():
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=ROOT_DIR.parent,
+            text=True,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        commit = "unavailable"
+    return {"commit": commit, "builtAt": os.environ.get("BUILD_TIMESTAMP", "runtime")}
 
 
 @api.get("/auth")
