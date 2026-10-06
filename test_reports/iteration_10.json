@@ -1,0 +1,65 @@
+{
+  "summary": "Static source verification plus a minimal preview smoke check for the 6 narrow preview-only fixes. No data was created, no auth was performed, no AI calls were made. All six items are present in source and consistent with the request. One minor caveat around durable /jobs/:id history (no popstate listener) is noted.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "static_verification": {
+    "1_artwork_upload_label_accessibility": {
+      "status": "PASS",
+      "evidence": "frontend/src/App.js line 304: <label className='upload-button primary' data-testid='artwork-upload-label'>...<input type='file' data-testid='artwork-upload-input' .../></label>. grep across /app/frontend/src confirms no data-debug-wrapper attribute is applied anywhere in JSX. The CSS rule at index.css:86 for [data-debug-wrapper='true'] > * only inherits spacing — no display:contents is defined anywhere in frontend. Runtime check in preview also shows 0 elements with computed display:contents and 0 data-debug-wrapper nodes."
+    },
+    "2_due_input_accessibility": {
+      "status": "PASS",
+      "evidence": "frontend/src/App.js line 168: <input name='due' type='date' inputMode='numeric' required aria-label='Due date, YYYY-MM-DD' data-testid='job-due-input' />."
+    },
+    "3_paused_state_rendering_and_control_events": {
+      "status": "PASS",
+      "evidence": "List: App.js line 444 renders Badge via item.state === 'paused' ? 'Paused' : ...  Detail: App.js line 259 visualStatus = job.state === 'paused' ? 'Paused' : task.status, consumed by Badge in header. Backend: server.py control endpoint (lines 406-427) validates state in {active,paused,cancelled}, sets job['state'], and record_event(job, f\"Job {('resumed' if state == 'active' else state)}.\", user['name']) before save_job."
+    },
+    "4_build_info_endpoint_and_settings_display": {
+      "status": "PASS",
+      "evidence": "Backend: server.py lines 109-119 GET /api/build-info returns {commit, builtAt}. Live preview call returned 200 {\"commit\":\"e4e47ee\",\"builtAt\":\"runtime\"}. Frontend: App.js line 385 useEffect fetches build-info; line 387 renders <p data-testid='build-info'>Build {commit} · {builtAt}</p> in Settings aside when build is truthy."
+    },
+    "5_jobs_id_deep_link_and_history": {
+      "status": "PASS (with minor caveat)",
+      "evidence": "Initial load: App.js line 440 useEffect parses /^\\/jobs\\/([^/]+)$/ from pathname and fetches when auth?.user is set. Open: line 438 window.history.pushState({}, '', `/jobs/${item.id}`). Back: line 444 back button calls window.history.pushState({}, '', '/'). Live preview deep-link to /jobs/abc123 shows auth screen (expected unauthenticated) and preserves URL.",
+      "caveat": "No window.addEventListener('popstate', ...) handler is registered. Pressing the browser back/forward button changes the URL but will not update React state, so the user may see a stale view. This is outside the stated 'durable /jobs/:id history navigation' happy path but is worth flagging."
+    },
+    "6_job_open_try_catch": {
+      "status": "PASS",
+      "evidence": "App.js line 438 open = async (item) => { try { const detail = await api(`jobs/${item.id}`); window.history.pushState(...); setJob(detail); } catch (reason) { setError(reason.message); } }. api() throws on non-ok responses (lines 42-44), and errors surface via the global error bar (data-testid='global-error')."
+    }
+  },
+  "preview_runtime_checks": {
+    "GET /api/build-info": "200 {\"commit\":\"e4e47ee\",\"builtAt\":\"runtime\"}",
+    "GET /api/jobs/nonexistent (unauth)": "401 {\"error\":\"Sign in to your shop.\"} (expected)",
+    "elements with display:contents": 0,
+    "elements with data-debug-wrapper attribute": 0,
+    "/jobs/abc123 (unauth)": "Auth screen rendered, URL preserved, no silent fetch error (jobs fetch is gated by auth?.user)."
+  },
+  "critical_code_review_comments": [
+    "App.js is a single 447-line file with inline JSX megalines (lines 331, 341, 387, 444). File is nearing the 700-line threshold and already hard to review; recommend splitting Settings/JobView/App into separate files.",
+    "No popstate listener — browser back/forward will desync React state from URL. If 'durable history navigation' includes browser back arrow, add a popstate effect that re-parses pathname and sets/clears job + view accordingly.",
+    "/api/build-info shells out to git on every call (subprocess.check_output). Cache the commit in a module-level variable at import time to avoid per-request subprocess latency and failure modes.",
+    "Dead CSS rule: [data-debug-wrapper='true'] > * selector remains in index.css:86-110 even though no element uses it. Safe to remove to prevent future regressions.",
+    "api() swallows the response body text when content-type is not JSON (returns null), so error messages from plain-text 5xx responses will be masked by the generic 'Unable to save. Please retry.' fallback."
+  ],
+  "test_report_links": [],
+  "action_items": [
+    "(Optional) Add a window popstate listener in App to make /jobs/:id navigation fully durable with browser back/forward.",
+    "(Optional) Cache git commit at startup for /api/build-info and remove the dormant data-debug-wrapper CSS rule."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "n/a (skipped per request)", "frontend": "6/6 items verified"},
+  "test_credentials": "Not used — per request, no auth, data creation, or AI invocation.",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "This iteration was intentionally scoped to static source + a minimal unauthenticated preview smoke check for the six preview-only fixes. If a full regression is requested later, read /app/memory/test_credentials.md, authenticate, and exercise job creation/pause/resume/control flows and the Settings build-info display end-to-end."
+}
