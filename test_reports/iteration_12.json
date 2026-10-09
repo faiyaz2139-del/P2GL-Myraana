@@ -1,0 +1,63 @@
+{
+  "summary": "Preview URL (https://p2g-production.preview.emergentagent.com) end-to-end verification with the disposable preview-only admin from /app/memory/test_credentials.md. GET /api/build-info returned commit 8cecc0889983bdfe83d95541db6964b154ff2289 and builtAt 2026-10-09T02:02:03+00:00 (matches /app/backend/build_metadata.json). All six requested fixes verified individually in the authenticated UI. 16 task summaries present. Mobile login smoke verified at 390x844. AI Production Review panel + button rendered; NOT clicked per user prohibition. Connector readiness and all physical/production steps marked BLOCKED (no CONNECTOR_SECRET / Edge Agent configured, no PDF artwork available, user forbids triggering physical print, authorizations, QC/pack/printed). Test job TEST_PREVIEW_CUSTOMER created and cancelled; no delete-job endpoint exists so record remains in cancelled state.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "verifications": {
+    "build_info_endpoint": {
+      "status": "PASS",
+      "response": {"commit": "8cecc0889983bdfe83d95541db6964b154ff2289", "builtAt": "2026-10-09T02:02:03+00:00"},
+      "source": "/app/backend/build_metadata.json via p2g.build_metadata.read_build_metadata (static file, not runtime git)"
+    },
+    "authenticated_login": {"status": "PASS", "desktop": true, "mobile_390x844": true},
+    "navigation": {
+      "status": "PASS",
+      "jobs": "renders [data-testid=jobs-page]",
+      "recipes": "renders [data-testid=recipes-page]",
+      "settings": "renders [data-testid=settings-page], includes [data-testid=build-info] with commit+builtAt",
+      "connect_shop": "[data-testid=connect-shop-button] rendered inside readiness action-row (step 10); [data-testid=connector-status] shows 'No verified local connection. Production readiness stays blocked.' as expected",
+      "no_dashboard_route": "Confirmed: product has only Jobs/Recipes/Shop settings; there is no Dashboard route. Reporting as-is per instructions.",
+      "api_errors_observed": [],
+      "global_error_bar": "Not shown during normal navigation"
+    },
+    "six_fixes": {
+      "1_artwork_upload_label_accessible": {"status": "PASS", "selector": "[data-testid=artwork-upload-label] visible, [data-testid=artwork-upload-input] present (hidden file input scoped under label)"},
+      "2_due_date_input_type": {"status": "PASS", "attribute": "type=date on [data-testid=job-due-input]"},
+      "3_pause_updates_status_list_history": {"status": "PASS", "evidence": "After pause, [data-testid=resume-job-button] appears, [data-testid=status-paused] badge appears, job list card shows Paused; backend record_event logs 'Job paused.' via /api/jobs/{id}/control"},
+      "4_build_metadata_in_shop_settings": {"status": "PASS", "selector": "[data-testid=build-info] text 'Build 8cecc0889983bdfe83d95541db6964b154ff2289 \u00b7 2026-10-09T02:02:03+00:00'"},
+      "5_direct_deep_link_rehydrate": {"status": "PASS", "evidence": "Navigated to /jobs/6ad79f3f-cb16-4382-98bb-d646107b28c5 directly after goto('/'); [data-testid=job-detail-view] and [data-testid=job-customer-title]=TEST_PREVIEW_CUSTOMER rendered"},
+      "6_navigation_fetch_error_handling": {"status": "PASS", "evidence": "No [data-testid=global-error] shown and no 4xx/5xx /api responses captured across jobs/recipes/settings/job-detail/deep-link navigation"}
+    },
+    "ai_production_review_panel": {
+      "status": "PASS (render-only, button NOT clicked per instructions)",
+      "panel_testid": "production-review-panel visible",
+      "button_testid": "run-production-review-button visible",
+      "header_label": "'Rule-based review' (settings.aiConnected = false, since AI not configured in preview)"
+    },
+    "sixteen_task_titles": {"status": "PASS", "evidence": "task-1-summary through task-16-summary all present (count=1 each). Visible in UI: 'Capture order', 'Receive artwork', 'Check artwork', ... through task 16."},
+    "safe_workflow_exercise": {
+      "status": "BLOCKED",
+      "reason": "No PDF artwork available to upload; preview has no CONNECTOR_SECRET configured and no Edge Agent heartbeat; the user explicitly forbids running AI evaluation, authorization, physical print/cut/QC/pack. preflight/PRINT_READY generation/verification/route/approval/RIP staging all require an uploaded PDF to proceed from step 1->2; readiness requires connector agent. Reporting BLOCKED instead of fabricating positive results.",
+      "blocked_steps": ["Upload artwork", "Check artwork (preflight)", "PRINT_READY generation", "Verify PRINT_READY", "Proof approval", "Route selection", "RIP staging", "Readiness check (connector agent absent)", "Authorize production", "Confirm printed", "Confirm cut", "QC", "Pack"]
+    },
+    "mobile_behavior": {"status": "PASS", "evidence": "At 390x844: login screen renders, submit succeeds, studio-app and jobs-page visible after sign-in"}
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "No DELETE endpoint for jobs. Cleanup of disposable preview test jobs can only transition them to 'cancelled' and leave the record in Mongo. Consider adding an admin-only DELETE /api/jobs/{id} for QA/preview environments, or a Mongo TTL index for jobs whose customer starts with 'TEST_'.",
+    "App.js lines 304-316 runAgentReview surfaces reason.message; api() helper does raise Error(data?.error || ...), which is correct for FastAPI AppError responses (shape {error: ...}). FastAPI validation errors (shape {detail: ...}) would surface as the fallback 'Unable to save. Please retry.' Minor DX note (previously flagged in iteration_11).",
+    "App.js line 455 deep-link rehydrate effect depends only on auth?.user; if a user navigates between routes using window.history inside the SPA (deep link to /jobs/:id then back() pushes '/'), subsequent manual URL changes without full reload will not re-trigger. In practice the Back button clears job state via setJob(null), which is fine, but note the effect won't run on client-side route changes other than the initial load. Not a blocker.",
+    "Settings page (App.js line 402) renders [data-testid=build-info] only if `build` state is truthy; if /api/build-info returns 'unavailable' strings (fallback path in p2g/build_metadata.py), the UI will still render the string. Consider hiding when values equal 'unavailable'."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% of endpoints exercised passed (GET /api/build-info, /api/auth, /api/auth/login, /api/jobs, /api/jobs/{id}, /api/recipes, /api/settings, /api/jobs POST, /api/jobs/{id}/control pause+resume+cancel)", "frontend": "100% of in-scope UI assertions passed"},
+  "test_credentials": "Used preview-verification-admin@print2go.test from /app/memory/test_credentials.md. Password not reproduced in this report.",
+  "seed_data_creation": "Created one disposable job (customer=TEST_PREVIEW_CUSTOMER, qty=250, due=2026-12-31, id=6ad79f3f-cb16-4382-98bb-d646107b28c5). It was cancelled afterwards. No delete endpoint exists; record remains in Mongo with state=cancelled.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Preview backend has no CONNECTOR_SECRET and no AI provider configured (settings.aiConnected=false, settings.connectorConfigured=false). Any full-workflow test beyond step 1 requires (a) an actual PDF upload and (b) a Connector heartbeat for readiness. User explicitly forbids physical print / authorize / real AI calls, so those stages must always be reported as BLOCKED, not simulated. There is no DELETE /api/jobs endpoint, so TEST_* records can only be cancelled."
+}

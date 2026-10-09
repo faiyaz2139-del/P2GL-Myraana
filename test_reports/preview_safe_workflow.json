@@ -1,0 +1,15 @@
+{
+  "authenticated_preview_admin": "PASS",
+  "test_route_configuration": "PASS",
+  "test_job_created": "PASS",
+  "artwork_upload": "PASS",
+  "preflight_print_ready_verification": "PASS",
+  "proof_approval_test_job": "PASS",
+  "route_selection": "PASS",
+  "rip_staging_record": "PASS",
+  "edge_agent_readiness_safety_gate": "PASS (HTTP 409 block as designed)",
+  "readiness_evidence": "Shop disconnected. Start the connector with a writable staging folder.",
+  "test_job_cancelled": "PASS",
+  "preview_settings_restored": "PASS",
+  "physical_print_authorization_qc_pack": "BLOCKED (not attempted by design)"
+}

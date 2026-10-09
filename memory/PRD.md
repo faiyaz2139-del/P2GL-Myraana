@@ -102,16 +102,30 @@ Myraana and never send a print command or claim physical production completed.
   metadata also contain no commit SHA, so the deployed commit is definitively
   unknown from available metadata. Full bundle inspection confirmed all six fixes
   and the Production Review UI as positive literals in `main.506517f0.js`.
+- Preview build-identity fix: `craco.config.js` now runs
+  `backend/scripts/stamp_build_metadata.py` for production builds. The script
+  writes commit and UTC build time to `backend/build_metadata.json`, and the
+  read-only `/api/build-info` endpoint returns only validated fields through
+  `p2g.build_metadata.read_build_metadata`; it no longer shells out to Git at
+  runtime. Preview evidence: commit
+  `df14ac2758c22257208decd93908b99f1c5395f2`, built at
+  `2026-10-09T02:07:17+00:00`.
+- Preview acceptance update: iteration 12 independently passed authenticated
+  desktop/mobile navigation, all six targeted UI fixes, 16 task summaries,
+  build display, and render-only advisory-review UI. A disposable valid-PDF job
+  additionally passed upload, preflight, PRINT_READY creation/verification,
+  proof approval, routing, and RIP staging. It was cancelled and settings were
+  restored. Connector readiness correctly blocked with the disconnected-agent
+  message; authorization, physical print, cut, QC, and pack were not attempted.
 
 ## Prioritized Backlog
 
 ### P0
 
-- Owner completes first-run administrator setup in the new preview only.
+- Configure a non-printing preview Edge Agent heartbeat with a writable staging
+  folder and `CONNECTOR_SECRET` before validating positive readiness.
 - Configure and verify direct Anthropic/OpenAI credentials or resolve the managed
   provider tool-call failure before enabling assistant conversations.
-- Configure `CONNECTOR_SECRET` outside source control and verify a shop computer
-  connector against a non-printing staging folder.
 
 ### P1
 
