@@ -103,7 +103,13 @@ async def approve_pairing(pairing_id, user):
 
 
 async def pairings():
-    return await db.connector_pairings.find({}, {"_id": 0, "code_hash": 0, "claim_hash": 0}).to_list(20)
+    records = await db.connector_pairings.find(
+        {},
+        {"code_hash": 0, "claim_hash": 0},
+    ).to_list(20)
+    for record in records:
+        record["id"] = record.pop("_id")
+    return records
 
 
 async def heartbeat(request, payload):

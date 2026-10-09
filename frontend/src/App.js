@@ -394,12 +394,54 @@ function Recipes({ recipes, reload, user }) {
   return <main className="settings-page" data-testid="recipes-page"><div className="page-heading"><div><span className="eyebrow">CONSISTENT PRINTS, EVERY TIME</span><h1>Recipes</h1><p className="muted">Each job keeps the version it started with.</p></div></div><div className="settings-layout"><section className="settings-card"><h3>{recipe?.name}</h3>{message && <p className="notice" data-testid="recipe-message">{message}</p>}<form onSubmit={save} data-testid="recipe-form"><fieldset disabled={user.role !== "admin"}><label>Recipe name<input name="name" defaultValue={recipe?.name} data-testid="recipe-name-input" /></label><div className="form-grid">{["width", "height", "bleed", "safe", "minDpi"].map((key) => <label key={key}>{key}<input name={key} type="number" step="0.001" defaultValue={recipe?.[key]} data-testid={`recipe-${key}-input`} /></label>)}</div><label>Cutting instructions<textarea name="cutInstructions" defaultValue={recipe?.cutInstructions} data-testid="recipe-instructions-input" /></label><button className="primary" data-testid="save-recipe-button">Save a new version</button></fieldset></form></section><aside className="settings-aside"><Layers size={25} /><h3>Version history</h3>{recipes.map((item) => <div className="version-row" key={item.version}><strong>v{item.version}</strong><span>{date(item.created)}</span></div>)}</aside></div></main>;
 }
 
+function ConnectorPairing({ settings, reload }) {
+  const [pairing, setPairing] = useState(null);
+  const [message, setMessage] = useState("");
+  const start = async () => {
+    try {
+      const result = await api("connector-pairings", { method: "POST", body: "{}" });
+      setPairing(result);
+      setMessage("Enter this one-time code in the installed Windows Connector.");
+      await reload();
+    } catch (reason) {
+      setMessage(reason.message);
+    }
+  };
+  const approve = async (id) => {
+    try {
+      await api(`connector-pairings/${id}/approve`, { method: "POST", body: "{}" });
+      setMessage("Approved. The connector will reconnect automatically.");
+      await reload();
+    } catch (reason) {
+      setMessage(reason.message);
+    }
+  };
+  return <section className="settings-card" data-testid="connector-pairing-panel">
+    <div className="section-heading"><h3>Connect Windows Connector</h3><Link2 /></div>
+    <p>Discovery is read-only. It cannot print, change printer settings, or release jobs.</p>
+    <a className="button" href="/setup/myraana-connector.py" download data-testid="download-windows-connector-link">
+      <Download size={16} />Download Connector
+    </a>
+    <button className="primary" onClick={start} data-testid="start-connector-pairing-button">
+      Pair connector
+    </button>
+    {pairing && <p className="notice" data-testid="connector-pairing-code">
+      One-time code: <strong>{pairing.code}</strong>
+    </p>}
+    {message && <p className="notice" data-testid="connector-pairing-message">{message}</p>}
+    {(settings.pairings || []).filter((item) => item.status === "Found").map((item) => <div className="version-row" key={item.id} data-testid={`pending-connector-${item.id}`}>
+      <span>{item.inventory?.hostname || "Windows connector"} · Found</span>
+      <button className="button" onClick={() => approve(item.id)} data-testid={`approve-connector-${item.id}`}>Approve</button>
+    </div>)}
+  </section>;
+}
+
 function Settings({ settings, user, reload }) {
   const [message, setMessage] = useState("");
   const [build, setBuild] = useState(null);
   useEffect(() => { api("build-info").then(setBuild).catch(() => setBuild(null)); }, []);
   const save = async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); try { await api("settings", { method: "POST", body: JSON.stringify({ printer: form.get("printer"), stocks: String(form.get("stocks")).split("\n").filter(Boolean), sides: [1, 2], instructions: form.get("instructions") }) }); setMessage("Shop settings saved. Active jobs require a route review."); reload(); } catch (reason) { setMessage(reason.message); } };
-  return <main className="settings-page" data-testid="settings-page"><div className="page-heading"><div><span className="eyebrow">PRINT2GO LONDON</span><h1>Shop settings</h1><p className="muted">Your route, connection and operators.</p></div><Badge status={settings.connected ? "Completed" : "Blocked"} /></div><div className="settings-layout"><div><section className="settings-card"><div className="section-heading"><h3>Production route</h3><Printer /></div>{message && <p className="notice" data-testid="settings-message">{message}</p>}<form onSubmit={save} data-testid="settings-form"><fieldset disabled={user.role !== "admin"}><label>Printer name<input name="printer" defaultValue={settings.printer} data-testid="printer-name-input" /></label><label>Supported stocks<textarea name="stocks" defaultValue={settings.stocks.join("\n")} data-testid="stocks-input" /></label><label>Handoff instructions<textarea name="instructions" defaultValue={settings.instructions} data-testid="handoff-instructions-input" /></label><button className="primary" data-testid="save-settings-button">Save shop settings</button></fieldset></form></section><section className="settings-card"><div className="section-heading"><h3>Connect shop</h3><Link2 /></div><p data-testid="connector-status">{settings.connected ? "The connector reports a writable destination." : "No verified local connection. Production readiness stays blocked."}</p><a className="button" href="/setup/print2go-connector.py" download data-testid="download-connector-link"><Download size={16} />Download local connector</a><details className="technical"><summary data-testid="connector-setup-summary">Connection setup</summary><ol><li>Configure the server and shop computer with the same connector secret.</li><li>Set the HTTPS Studio URL and a writable staging folder.</li><li>Run the connector. It stages authorized PDFs only; it never prints.</li></ol></details></section>{user.role === "admin" && <Operators />}</div><aside className="settings-aside"><ShieldCheck size={26} /><h3>A shop you can trust.</h3><p data-testid="assistant-status">Assistant: {settings.aiConnected ? "configured; first request verifies access" : "server setup needed"}</p><p>Local shop: {settings.connected ? "connected" : "disconnected"}</p><p>RIP integration: operator-assisted.</p>{build && <p data-testid="build-info">Build {build.commit} · {build.builtAt}</p>}</aside></div></main>;
+  return <main className="settings-page" data-testid="settings-page"><div className="page-heading"><div><span className="eyebrow">PRINT2GO LONDON</span><h1>Shop settings</h1><p className="muted">Your route, connection and operators.</p></div><Badge status={settings.connected ? "Completed" : "Blocked"} /></div><div className="settings-layout"><div><section className="settings-card"><div className="section-heading"><h3>Production route</h3><Printer /></div>{message && <p className="notice" data-testid="settings-message">{message}</p>}<form onSubmit={save} data-testid="settings-form"><fieldset disabled={user.role !== "admin"}><label>Printer name<input name="printer" defaultValue={settings.printer} data-testid="printer-name-input" /></label><label>Supported stocks<textarea name="stocks" defaultValue={settings.stocks.join("\n")} data-testid="stocks-input" /></label><label>Handoff instructions<textarea name="instructions" defaultValue={settings.instructions} data-testid="handoff-instructions-input" /></label><button className="primary" data-testid="save-settings-button">Save shop settings</button></fieldset></form></section><section className="settings-card"><div className="section-heading"><h3>Connect shop</h3><Link2 /></div><p data-testid="connector-status">{settings.connected ? "The connector reports a writable destination." : "No verified local connection. Production readiness stays blocked."}</p><a className="button" href="/setup/print2go-connector.py" download data-testid="download-connector-link"><Download size={16} />Download local connector</a><details className="technical"><summary data-testid="connector-setup-summary">Connection setup</summary><ol><li>Configure the server and shop computer with the same connector secret.</li><li>Set the HTTPS Studio URL and a writable staging folder.</li><li>Run the connector. It stages authorized PDFs only; it never prints.</li></ol></details></section>{user.role === "admin" && <ConnectorPairing settings={settings} reload={reload} />}{user.role === "admin" && <Operators />}</div><aside className="settings-aside"><ShieldCheck size={26} /><h3>A shop you can trust.</h3><p data-testid="assistant-status">Assistant: {settings.aiConnected ? "configured; first request verifies access" : "server setup needed"}</p><p>Local shop: {settings.connected ? "connected" : "disconnected"}</p><p>RIP integration: operator-assisted.</p>{build && <p data-testid="build-info">Build {build.commit} · {build.builtAt}</p>}</aside></div></main>;
 }
 
 function Operators() {
