@@ -17,6 +17,14 @@ load_dotenv(ROOT_DIR / ".env")
 from p2g.ai import configured as ai_configured, conversation_events
 from p2g.agent_bridge import evaluate_agents
 from p2g.build_metadata import read_build_metadata
+from p2g.connector_pairing import (
+    approve_pairing,
+    claim_pairing,
+    create_pairing,
+    heartbeat as paired_heartbeat,
+    pairings,
+    pairing_status,
+)
 from p2g.core import AppError, db, new_id, now
 from p2g.pdfcheck import render_page
 from p2g.workflow import (
@@ -229,7 +237,36 @@ async def settings(request: Request):
         "connectorConfigured": bool(os.environ.get("CONNECTOR_SECRET")),
         "agent": agent,
         "connected": bool(agent and agent.get("writable")),
+        "pairings": await pairings(),
     }
+
+
+@api.post("/connector-pairings")
+async def start_connector_pairing(request: Request):
+    assert_origin(request)
+    return await create_pairing(require_admin(await current_user(request)))
+
+
+@api.post("/connector-pairings/claim")
+async def claim_connector_pairing(request: Request):
+    return await claim_pairing(await request.json())
+
+
+@api.post("/connector-pairings/{pairing_id}/approve")
+async def approve_connector_pairing(pairing_id: str, request: Request):
+    assert_origin(request)
+    return await approve_pairing(pairing_id, require_admin(await current_user(request)))
+
+
+@api.post("/connector-pairings/{pairing_id}/poll")
+async def poll_connector_pairing(pairing_id: str, request: Request):
+    payload = await request.json()
+    return await pairing_status(pairing_id, str(payload.get("claimSecret") or ""))
+
+
+@api.post("/connector-devices/heartbeat")
+async def paired_connector_heartbeat(request: Request):
+    return await paired_heartbeat(request, await request.json())
 
 
 @api.post("/settings")
