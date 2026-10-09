@@ -123,6 +123,12 @@ Myraana and never send a print command or claim physical production completed.
   `/app/artifacts/Myraana_Windows_Connector_Preview.zip`. The archive was checked
   to exclude `.env`, local state, credentials, and pairing secrets. Real Windows
   executable and printer validation remain intentionally untested.
+- GitHub Actions handoff: `.github/workflows/build-windows-connector.yml` uses a
+  GitHub-hosted Windows runner to install pinned connector dependencies, invoke the
+  existing unsigned PyInstaller script, validate `.exe` output, and upload a
+  five-day preview artifact. It contains no secrets, signing, release, deployment,
+  or printing action. GitHub repository access was unavailable in this environment,
+  so the workflow has not been run.
 
 ## Prioritized Backlog
 
