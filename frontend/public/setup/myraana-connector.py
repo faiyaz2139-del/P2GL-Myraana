@@ -110,7 +110,7 @@ def run():
                 print("Found: awaiting Myraana administrator approval.")
             result = request(
                 f"/connector-pairings/{state['pairingId']}/poll",
-                {"claimSecret": state["claimSecret"]},
+                {"claimSecret": claim_secret},
             )
             if result.get("credential"):
                 credential = secret("credential", result["credential"])
