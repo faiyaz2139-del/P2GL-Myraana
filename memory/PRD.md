@@ -95,6 +95,13 @@ Myraana and never send a print command or claim physical production completed.
   blocked without an authorized session. `build-info` obtains its commit using
   `git rev-parse --short HEAD` and returns `unavailable` on lookup failure, so the
   actual deployed commit cannot be evidenced from the available metadata.
+- Deployment-agent confirmation: production package intentionally has no `.git`,
+  and the platform build injects neither `GIT_COMMIT` nor `BUILD_TIMESTAMP`.
+  Therefore the runtime `git rev-parse` call fails and the endpoint correctly
+  returns `commit: unavailable` and `builtAt: runtime`. Deployment logs and image
+  metadata also contain no commit SHA, so the deployed commit is definitively
+  unknown from available metadata. Full bundle inspection confirmed all six fixes
+  and the Production Review UI as positive literals in `main.506517f0.js`.
 
 ## Prioritized Backlog
 
