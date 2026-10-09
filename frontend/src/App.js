@@ -254,6 +254,7 @@ function JobView({ job, reload, back, settings, user, openSettings }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [ack, setAck] = useState(false);
+  const [agentReview, setAgentReview] = useState(null);
   const current = job.tasks.findIndex((task) => task.status !== "Completed");
   const task = job.tasks[current] || job.tasks[job.tasks.length - 1];
   const visualStatus = job.state === "paused" ? "Paused" : task.status;
@@ -300,6 +301,19 @@ function JobView({ job, reload, back, settings, user, openSettings }) {
       setBusy(false);
     }
   };
+  const runAgentReview = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const review = await api(`jobs/${job.id}/agents/evaluate`, { method: "POST" });
+      setAgentReview(review);
+      await reload();
+    } catch (reason) {
+      setError(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  };
   const actionPanel = () => {
     if (current === 1 || (current <= 6 && task.status === "Blocked")) return <label className="upload-button primary" data-testid="artwork-upload-label"><Upload size={17} />{original ? "Upload revised artwork" : "Upload artwork"}<input type="file" accept="application/pdf" disabled={busy} data-testid="artwork-upload-input" onChange={(event) => upload(event.target.files?.[0])} /></label>;
     if (current === 2 || current === 4 || current === 5 || current === 6) return <button className="primary" onClick={process} disabled={busy} data-testid="process-artwork-button"><ShieldCheck size={17} />{busy ? "Checking…" : "Check artwork"}</button>;
@@ -335,6 +349,7 @@ function JobView({ job, reload, back, settings, user, openSettings }) {
       <div className="job-heading"><div><span className="eyebrow">BUSINESS CARDS · RECIPE V{job.recipe.version}</span><h1 data-testid="job-customer-title">{job.customer}</h1><p>{job.quantity.toLocaleString()} cards · {job.sides === 2 ? "Double-sided" : "Single-sided"} · Due {job.due}</p></div><Badge status={visualStatus} /></div>
       <div className="summary-strip"><div><span>Finished size</span><strong>{job.recipe.width} × {job.recipe.height} in</strong></div><div><span>Stock</span><strong>{job.stock}</strong></div><div><span>Finish</span><strong>{job.finish}</strong></div><div><span>Progress</span><strong>{job.tasks.filter((item) => item.status === "Completed").length} of 16 steps</strong></div></div>
       <div className="progress-line" data-testid="job-progress">{job.tasks.map((item) => <div key={item.id} className={item.status === "Completed" ? "done" : item.status === "Running" ? "running" : ""} />)}</div>
+      <section className="next-action" data-testid="production-review-panel"><div className="next-label"><span className="eyebrow">PRODUCTION REVIEW</span><span>{settings?.aiConnected ? "AI-assisted" : "Rule-based review"}</span></div><h2>Run AI Production Review</h2><p>Reviews saved job evidence only. It cannot approve, complete workflow steps, or print.</p><button className="button" onClick={runAgentReview} disabled={busy} data-testid="run-production-review-button"><ShieldCheck size={17} />{busy ? "Reviewing…" : "Run AI Production Review"}</button>{agentReview && <div className="inspection-details" data-testid="production-review-results"><div className="section-heading"><h3>{agentReview.results?.some((item) => item.status === "STOP") ? "Not production-ready" : "Production review complete"}</h3><span>{settings?.aiConnected ? "AI-assisted" : "Rule-based review"}</span></div>{(agentReview.results || []).map((item) => <div className="inspection-note" key={`${agentReview.execution}-${item.agent}`}><strong>{item.agent} · {item.status}</strong><p>{item.summary}</p>{item.stop_reasons?.length > 0 && <p>Next: {item.stop_reasons.join(" ")}</p>}{item.warnings?.length > 0 && <p>Next: {item.warnings.join(" ")}</p>}</div>)}</div>}</section>
       <section className="next-action" data-testid="next-action-panel"><div className="next-label"><span className="eyebrow">YOUR NEXT STEP</span><span>Step {current + 1} of 16</span></div><h2>{task.title}</h2><p>{task.result}</p>{actionPanel()}</section>
       {proof && <section className="proof-section" data-testid="production-proof-section"><div className="section-heading"><h3>Production proof</h3><a className="text-button" href={`${API}/files/${job.id}/${proof.id}?download`} data-testid="download-print-ready-link"><Download size={15} />Download PDF</a></div><div className="proof-holder"><div className="proof-pages">{Array.from({ length: job.sides }).map((_, index) => <div className="proof-page" key={index}><p>{index ? "Back" : "Front"}</p><img src={`${API}/files/${job.id}/${proof.id}/preview/${index + 1}`} alt={`Proof page ${index + 1}`} data-testid={`proof-page-${index + 1}`} /></div>)}</div></div><div className="file-identity"><ShieldCheck size={15} /><span>Actual generated production file<small data-testid="print-ready-sha">SHA-256 {proof.sha}</small></span></div></section>}
       {job.inspection && <details className="inspection-details" open data-testid="inspection-details"><summary><AlertTriangle size={16} />Artwork inspection · {job.inspection.errors.length} blocking issue(s)</summary><div>{job.inspection.errors.map((item) => <p className="notice warning" key={item}>{item}</p>)}{job.inspection.warnings.map((item) => <p className="inspection-note" key={item}>{item}</p>)}</div></details>}
