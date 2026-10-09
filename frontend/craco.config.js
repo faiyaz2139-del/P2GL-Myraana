@@ -1,10 +1,19 @@
 // craco.config.js
 const path = require("path");
+const { execFileSync } = require("child_process");
 require("dotenv").config();
 
 // Check if we're in development/preview mode (not production build)
 // Craco sets NODE_ENV=development for start, NODE_ENV=production for build
 const isDevServer = process.env.NODE_ENV !== "production";
+
+if (!isDevServer) {
+  execFileSync(
+    "python3",
+    [path.resolve(__dirname, "../backend/scripts/stamp_build_metadata.py")],
+    { cwd: path.resolve(__dirname, ".."), stdio: "inherit" },
+  );
+}
 
 // Environment variable overrides
 const config = {

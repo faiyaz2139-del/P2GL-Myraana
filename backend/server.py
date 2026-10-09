@@ -1,7 +1,6 @@
 import hmac
 import json
 import os
-import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +16,7 @@ load_dotenv(ROOT_DIR / ".env")
 
 from p2g.ai import configured as ai_configured, conversation_events
 from p2g.agent_bridge import evaluate_agents
+from p2g.build_metadata import read_build_metadata
 from p2g.core import AppError, db, new_id, now
 from p2g.pdfcheck import render_page
 from p2g.workflow import (
@@ -108,15 +108,7 @@ async def health():
 
 @api.get("/build-info")
 async def build_info():
-    try:
-        commit = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=ROOT_DIR.parent,
-            text=True,
-        ).strip()
-    except (OSError, subprocess.CalledProcessError):
-        commit = "unavailable"
-    return {"commit": commit, "builtAt": os.environ.get("BUILD_TIMESTAMP", "runtime")}
+    return read_build_metadata()
 
 
 @api.get("/auth")
