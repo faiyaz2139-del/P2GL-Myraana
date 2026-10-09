@@ -41,9 +41,9 @@ TOOLS = [
 
 
 def provider_order():
-    primary = "openai" if os.environ.get("AI_PRIMARY_PROVIDER") == "openai" else "anthropic"
+    primary = "anthropic" if os.environ.get("AI_PRIMARY_PROVIDER", "openai").lower() == "anthropic" else "openai"
     providers = [primary]
-    if os.environ.get("AI_FALLBACK_ENABLED", "true").lower() != "false":
+    if os.environ.get("AI_FALLBACK_ENABLED", "false").lower() == "true":
         providers.append("openai" if primary == "anthropic" else "anthropic")
     configured = []
     for provider in providers:
