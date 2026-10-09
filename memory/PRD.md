@@ -129,6 +129,11 @@ Myraana and never send a print command or claim physical production completed.
   five-day preview artifact. It contains no secrets, signing, release, deployment,
   or printing action. GitHub repository access was unavailable in this environment,
   so the workflow has not been run.
+- Deployment incident: a frontend-only production build failed because
+  `craco.config.js` required an unavailable backend metadata-stamping script and
+  Git worktree. The hook now fails open with a non-sensitive warning; local
+  `yarn build` passed afterward. No redeploy was initiated, and the earlier live
+  production run remains unaffected.
 
 ## Prioritized Backlog
 

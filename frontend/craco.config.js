@@ -8,11 +8,15 @@ require("dotenv").config();
 const isDevServer = process.env.NODE_ENV !== "production";
 
 if (!isDevServer) {
-  execFileSync(
-    "python3",
-    [path.resolve(__dirname, "../backend/scripts/stamp_build_metadata.py")],
-    { cwd: path.resolve(__dirname, ".."), stdio: "inherit" },
-  );
+  try {
+    execFileSync(
+      "python3",
+      [path.resolve(__dirname, "../backend/scripts/stamp_build_metadata.py")],
+      { cwd: path.resolve(__dirname, ".."), stdio: "inherit" },
+    );
+  } catch (error) {
+    console.warn("Build metadata stamping is unavailable in this frontend-only build.");
+  }
 }
 
 // Environment variable overrides
