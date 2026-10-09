@@ -79,6 +79,12 @@ Myraana and never send a print command or claim physical production completed.
   live custom-domain routing.
 - FAIL (honestly blocked): managed LLM tool-call probe returned a provider-side
   request-format error. The assistant remains unconfigured rather than claiming AI.
+- Deployment status check: live run `bf94d950` completed successfully for
+  `myraana.com` and `www.myraana.com`. Read-only checks found root, `/api/`, and
+  `/api/auth` healthy, active Cloudflare SSL, no destructive migration/reset log
+  activity, and no recent 5xx errors. The requested git commit cannot be matched
+  byte-for-byte because `/api/build-info` reports `commit:unavailable`; production
+  data integrity remains unverified within the read-only check scope.
 
 ## Prioritized Backlog
 
