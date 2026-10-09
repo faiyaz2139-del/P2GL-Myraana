@@ -130,7 +130,16 @@ def run():
                     save_state(state)
                     print("Pairing approved. Credentials stored in Windows Credential Manager.")
             time.sleep(30)
-        except (urllib.error.URLError, urllib.error.HTTPError, KeyError, OSError) as error:
+        except urllib.error.HTTPError as error:
+            if error.code == 409 and not credential and state.get("pairingId"):
+                state.pop("pairingId", None)
+                save_state(state)
+                print("Pairing expired or invalid. Create a new code in Myraana.")
+                os.environ.pop("MYRAANA_PAIRING_CODE", None)
+            else:
+                print(f"Server returned HTTP {error.code}. Retrying safely.")
+            time.sleep(30)
+        except (urllib.error.URLError, KeyError, OSError) as error:
             print(f"Offline or awaiting service: {type(error).__name__}. Retrying. No print actions are available.")
             time.sleep(30)
 
