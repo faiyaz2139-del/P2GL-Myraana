@@ -85,6 +85,10 @@ Myraana and never send a print command or claim physical production completed.
   activity, and no recent 5xx errors. The requested git commit cannot be matched
   byte-for-byte because `/api/build-info` reports `commit:unavailable`; production
   data integrity remains unverified within the read-only check scope.
+- Final live browser check: `https://myraana.com` served the expected sign-in page,
+  but the available browser context had no authorized session. No protected job UI,
+  review panel, workflow, or build metadata was accessed; no production mutation
+  was attempted. Build-to-commit identity remains unverified.
 
 ## Prioritized Backlog
 
