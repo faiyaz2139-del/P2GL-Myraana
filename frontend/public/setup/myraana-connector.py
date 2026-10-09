@@ -13,9 +13,15 @@ import urllib.error
 import urllib.request
 import uuid
 
+try:
+    import keyring
+except ImportError:
+    keyring = None
+
 
 API_URL = os.environ.get("MYRAANA_URL", "").rstrip("/") + "/api"
 STATE_PATH = os.path.join(os.environ.get("LOCALAPPDATA", "."), "Myraana", "connector.json")
+SERVICE = "MyraanaConnector"
 
 
 def load_state():
@@ -30,6 +36,15 @@ def save_state(state):
     os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
     with open(STATE_PATH, "w", encoding="utf-8") as handle:
         json.dump(state, handle)
+
+
+def secret(name, value=None):
+    if not keyring:
+        raise RuntimeError("Windows Credential Manager support is required.")
+    if value is not None:
+        keyring.set_password(SERVICE, name, value)
+        return value
+    return keyring.get_password(SERVICE, name)
 
 
 def printers():
@@ -73,10 +88,14 @@ def request(path, payload, credential=None):
 def run():
     state = load_state()
     state.setdefault("deviceId", str(uuid.uuid4()))
-    state.setdefault("claimSecret", secrets.token_urlsafe(48))
+    claim_secret = secret("claimSecret") or secret("claimSecret", secrets.token_urlsafe(48))
+    credential = secret("credential")
+    state.pop("claimSecret", None)
+    state.pop("credential", None)
+    save_state(state)
     while True:
         try:
-            if not state.get("credential"):
+            if not credential:
                 code = os.environ.get("MYRAANA_PAIRING_CODE", "").strip().upper()
                 if not code:
                     print("Needs Attention: enter the one-time code shown in Myraana.")
@@ -84,7 +103,7 @@ def run():
                     continue
                 claimed = request("/connector-pairings/claim", {
                     "code": code, "deviceId": state["deviceId"],
-                    "claimSecret": state["claimSecret"], "inventory": inventory(),
+                    "claimSecret": claim_secret, "inventory": inventory(),
                 })
                 state["pairingId"] = claimed["id"]
                 save_state(state)
@@ -94,10 +113,9 @@ def run():
                 {"claimSecret": state["claimSecret"]},
             )
             if result.get("credential"):
-                state["credential"] = result["credential"]
-                save_state(state)
-            if state.get("credential"):
-                request("/connector-devices/heartbeat", {"inventory": inventory()}, state["credential"])
+                credential = secret("credential", result["credential"])
+            if credential:
+                request("/connector-devices/heartbeat", {"inventory": inventory()}, credential)
                 print("Connected: discovery and health check complete. No print actions are available.")
             time.sleep(30)
         except (urllib.error.URLError, urllib.error.HTTPError, KeyError):
