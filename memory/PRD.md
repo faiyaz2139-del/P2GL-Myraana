@@ -89,6 +89,12 @@ Myraana and never send a print command or claim physical production completed.
   but the available browser context had no authorized session. No protected job UI,
   review panel, workflow, or build metadata was accessed; no production mutation
   was attempted. Build-to-commit identity remains unverified.
+- Read-only deployed-bundle inspection: `main.506517f0.js` contains deployed
+  implementation markers for all six targeted UI fixes and the `Run AI Production
+  Review` control. This proves bundle presence only; protected interaction remains
+  blocked without an authorized session. `build-info` obtains its commit using
+  `git rev-parse --short HEAD` and returns `unavailable` on lookup failure, so the
+  actual deployed commit cannot be evidenced from the available metadata.
 
 ## Prioritized Backlog
 
