@@ -19,7 +19,6 @@ except ImportError:
     keyring = None
 
 
-API_URL = os.environ.get("MYRAANA_URL", "").rstrip("/") + "/api"
 STATE_PATH = os.path.join(os.environ.get("LOCALAPPDATA", "."), "Myraana", "connector.json")
 SERVICE = "MyraanaConnector"
 
@@ -75,12 +74,12 @@ def inventory():
             "fiery_rip": [], "hot_folders": []}
 
 
-def request(path, payload, credential=None):
+def request(api_url, path, payload, credential=None):
     headers = {"Content-Type": "application/json"}
     if credential:
         headers["Authorization"] = f"Bearer {credential}"
     body = json.dumps(payload).encode("utf-8")
-    call = urllib.request.Request(API_URL + path, data=body, headers=headers)
+    call = urllib.request.Request(api_url + path, data=body, headers=headers)
     with urllib.request.urlopen(call, timeout=20) as response:
         return json.load(response)
 
@@ -88,6 +87,12 @@ def request(path, payload, credential=None):
 def run():
     state = load_state()
     state.setdefault("deviceId", str(uuid.uuid4()))
+    url = os.environ.get("MYRAANA_URL", "").strip().rstrip("/")
+    if not url:
+        url = input("Enter your Myraana HTTPS website URL: ").strip().rstrip("/")
+    if not url.startswith("https://") or not url.split("://", 1)[1]:
+        raise RuntimeError("A valid HTTPS Myraana website URL is required.")
+    api_url = url + "/api"
     claim_secret = secret("claimSecret") or secret("claimSecret", secrets.token_urlsafe(48))
     credential = secret("credential")
     state.pop("claimSecret", None)
@@ -95,31 +100,38 @@ def run():
     save_state(state)
     while True:
         try:
-            if not credential:
-                code = os.environ.get("MYRAANA_PAIRING_CODE", "").strip().upper()
-                if not code:
-                    print("Needs Attention: enter the one-time code shown in Myraana.")
-                    time.sleep(15)
-                    continue
-                claimed = request("/connector-pairings/claim", {
-                    "code": code, "deviceId": state["deviceId"],
-                    "claimSecret": claim_secret, "inventory": inventory(),
-                })
-                state["pairingId"] = claimed["id"]
-                save_state(state)
-                print("Found: awaiting Myraana administrator approval.")
-            result = request(
-                f"/connector-pairings/{state['pairingId']}/poll",
-                {"claimSecret": claim_secret},
-            )
-            if result.get("credential"):
-                credential = secret("credential", result["credential"])
             if credential:
-                request("/connector-devices/heartbeat", {"inventory": inventory()}, credential)
+                request(api_url, "/connector-devices/heartbeat",
+                        {"inventory": inventory()}, credential)
                 print("Connected: discovery and health check complete. No print actions are available.")
+            else:
+                if not state.get("pairingId"):
+                    code = os.environ.get("MYRAANA_PAIRING_CODE", "").strip().upper()
+                    if not code:
+                        code = input("Enter the one-time pairing code from Myraana: ").strip().upper()
+                    if not code:
+                        print("Needs Attention: pairing code is required.")
+                        time.sleep(15)
+                        continue
+                    claimed = request(api_url, "/connector-pairings/claim", {
+                        "code": code, "deviceId": state["deviceId"],
+                        "claimSecret": claim_secret, "inventory": inventory(),
+                    })
+                    state["pairingId"] = claimed["id"]
+                    save_state(state)
+                    print("Found: awaiting Myraana administrator approval.")
+                result = request(api_url,
+                    f"/connector-pairings/{state['pairingId']}/poll",
+                    {"claimSecret": claim_secret},
+                )
+                if result.get("credential"):
+                    credential = secret("credential", result["credential"])
+                    state.pop("pairingId", None)
+                    save_state(state)
+                    print("Pairing approved. Credentials stored in Windows Credential Manager.")
             time.sleep(30)
-        except (urllib.error.URLError, urllib.error.HTTPError, KeyError):
-            print("Offline: retrying automatically. No print actions are available.")
+        except (urllib.error.URLError, urllib.error.HTTPError, KeyError, OSError) as error:
+            print(f"Offline or awaiting service: {type(error).__name__}. Retrying. No print actions are available.")
             time.sleep(30)
 
 
