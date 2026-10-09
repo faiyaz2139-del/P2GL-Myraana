@@ -216,7 +216,13 @@ def extract_blocks(provider, response):
         calls = [item for item in blocks if item.get("type") == "tool_use"]
         return text, calls
     blocks = response.get("output", [])
-    text = "".join(item.get("text", "") for item in blocks if item.get("type") == "output_text")
+    text = "".join(
+        part.get("text", "")
+        for item in blocks
+        if item.get("type") == "message"
+        for part in item.get("content", [])
+        if part.get("type") == "output_text"
+    )
     calls = [item for item in blocks if item.get("type") == "function_call"]
     return text, calls
 
