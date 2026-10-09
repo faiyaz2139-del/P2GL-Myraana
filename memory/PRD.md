@@ -117,6 +117,12 @@ Myraana and never send a print command or claim physical production completed.
   proof approval, routing, and RIP staging. It was cancelled and settings were
   restored. Connector readiness correctly blocked with the disconnected-agent
   message; authorization, physical print, cut, QC, and pack were not attempted.
+- Windows Connector handoff: source, unsigned preview PyInstaller build script,
+  pinned Windows-only dependencies, pairing instructions, and a read-only hardware
+  acceptance checklist were packaged in
+  `/app/artifacts/Myraana_Windows_Connector_Preview.zip`. The archive was checked
+  to exclude `.env`, local state, credentials, and pairing secrets. Real Windows
+  executable and printer validation remain intentionally untested.
 
 ## Prioritized Backlog
 
