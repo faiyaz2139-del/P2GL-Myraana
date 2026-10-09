@@ -72,6 +72,9 @@ Myraana and never send a print command or claim physical production completed.
   `Disconnected or stale connector.` reason before artwork replacement. Positive
   QC completion remains explicitly NOT TESTED because no physical operator stages
   were fabricated.
+- Feature added: a minimal job-detail advisory Production Review panel invokes the
+  existing no-body agent evaluation endpoint and displays persisted PASS/WARN/STOP
+  evidence without mutating workflow state. Targeted static verification passed.
 - NOT VERIFIED: live connector/hardware, direct Anthropic/OpenAI credentials, and
   live custom-domain routing.
 - FAIL (honestly blocked): managed LLM tool-call probe returned a provider-side

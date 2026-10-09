@@ -1,0 +1,32 @@
+{
+  "summary": "Frontend-only static + preview verification of the advisory 'Run AI Production Review' panel in JobView. Preview URL loads successfully to the first-admin setup screen (empty production, first-run), as expected. Per request constraints, no authentication, admin creation, data mutation, or AI call was performed. Source inspection of /app/frontend/src/App.js JobView confirms all four acceptance criteria.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "static_verification": {
+    "production_review_panel_testid_present": true,
+    "run_production_review_button_testid_present": true,
+    "request_endpoint": "POST jobs/${job.id}/agents/evaluate",
+    "request_body": "NONE (api called with { method: 'POST' } only; no browser-supplied state)",
+    "result_rendering": "Renders agent · status (STOP/WARN/PASS), summary paragraph, and 'Next:' line for stop_reasons / warnings. Heading toggles 'Not production-ready' when any STOP else 'Production review complete'.",
+    "unavailable_provider_label": "'Rule-based review' shown in panel header and results when settings?.aiConnected is falsy; 'AI-assisted' when true.",
+    "runAgentReview_source_audit": "Function only calls api(POST /agents/evaluate) then setAgentReview(review) and reload() (GET). No calls to act(), process(), upload(), control(), approvals, or print mutations. Confirms advisory-only semantics.",
+    "preview_load": "https://p2g-production.preview.emergentagent.com loads to 'Set up your shop' first-admin setup — expected on empty first-run production."
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "The entire JobView <section data-testid=\"production-review-panel\"> is written as a single long JSX line (line 352). It is functionally correct but reduces readability/diff-review quality; consider formatting across multiple lines.",
+    "runAgentReview catches errors into setError but surfaces reason.message only; if backend returns FastAPI {detail: ...}, ensure api() helper normalizes to .message. Minor DX note."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (skipped per request)", "frontend": "100% static criteria pass"},
+  "test_credentials": "Not used (no auth per request).",
+  "seed_data_creation": "None.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Prior iterations (iteration_10.json) covered broader agents e2e. This iteration is a narrow preview shell verification of the advisory production-review panel per restricted scope (no admin create, no AI call). All four acceptance criteria pass by static inspection; preview URL loads to empty-first-run setup page as expected. Full dynamic flow would require creating admin + a job before clicking the Run button; main agent can self-test if needed."
+}
