@@ -349,10 +349,10 @@ function JobView({ job, reload, back, settings, user, openSettings }) {
       <div className="job-heading"><div><span className="eyebrow">BUSINESS CARDS · RECIPE V{job.recipe.version}</span><h1 data-testid="job-customer-title">{job.customer}</h1><p>{job.quantity.toLocaleString()} cards · {job.sides === 2 ? "Double-sided" : "Single-sided"} · Due {job.due}</p></div><Badge status={visualStatus} /></div>
       <div className="summary-strip"><div><span>Finished size</span><strong>{job.recipe.width} × {job.recipe.height} in</strong></div><div><span>Stock</span><strong>{job.stock}</strong></div><div><span>Finish</span><strong>{job.finish}</strong></div><div><span>Progress</span><strong>{job.tasks.filter((item) => item.status === "Completed").length} of 16 steps</strong></div></div>
       <div className="progress-line" data-testid="job-progress">{job.tasks.map((item) => <div key={item.id} className={item.status === "Completed" ? "done" : item.status === "Running" ? "running" : ""} />)}</div>
-      <section className="next-action" data-testid="production-review-panel"><div className="next-label"><span className="eyebrow">PRODUCTION REVIEW</span><span>{settings?.aiConnected ? "AI-assisted" : "Rule-based review"}</span></div><h2>Run AI Production Review</h2><p>Reviews saved job evidence only. It cannot approve, complete workflow steps, or print.</p><button className="button" onClick={runAgentReview} disabled={busy} data-testid="run-production-review-button"><ShieldCheck size={17} />{busy ? "Reviewing…" : "Run AI Production Review"}</button>{agentReview && <div className="inspection-details" data-testid="production-review-results"><div className="section-heading"><h3>{agentReview.results?.some((item) => item.status === "STOP") ? "Not production-ready" : "Production review complete"}</h3><span>{settings?.aiConnected ? "AI-assisted" : "Rule-based review"}</span></div>{(agentReview.results || []).map((item) => <div className="inspection-note" key={`${agentReview.execution}-${item.agent}`}><strong>{item.agent} · {item.status}</strong><p>{item.summary}</p>{item.stop_reasons?.length > 0 && <p>Next: {item.stop_reasons.join(" ")}</p>}{item.warnings?.length > 0 && <p>Next: {item.warnings.join(" ")}</p>}</div>)}</div>}</section>
+      <section className="next-action" data-testid="production-review-panel"><div className="next-label"><span className="eyebrow">PRODUCTION REVIEW</span><span>{settings?.aiConnected ? "AI-assisted" : "Rule-based review"}</span></div><h2>Run AI Production Review</h2><p>Reviews saved job evidence only. It cannot approve, complete workflow steps, or print.</p><button className="button" onClick={runAgentReview} disabled={busy} data-testid="run-production-review-button"><ShieldCheck size={17} />{busy ? "Reviewing…" : "Run AI Production Review"}</button>{agentReview && <div className="inspection-details" data-testid="production-review-results"><div className="section-heading"><h3>{agentReview.results?.some((item) => item.status === "STOP") ? "Not production-ready" : "Production review complete"}</h3><span>{settings?.aiConnected ? "AI-assisted" : "Rule-based review"}</span></div>{(agentReview.results || []).map((item) => <div className="inspection-note" key={`${agentReview.execution}-${item.agent}`}><strong>{item.agent} · {item.status}</strong><p>{item.summary}</p>{item.stop_reasons?.length > 0 && <p>Next: {item.stop_reasons.join(" ")}</p>}{item.warnings?.length > 0 && <p>Next: {item.warnings.join(" ")}</p>}{item.data?.selected_plan?.cost_estimate && <p data-testid="cost-estimate-summary">Cost {item.data.selected_plan.cost_estimate.total} · Margin {item.data.selected_plan.cost_estimate.profit_margin_percent ?? "unavailable"}%</p>}{item.data?.money_cost === "UNKNOWN" && <p data-testid="cost-inputs-missing">Cost inputs are unavailable; no cheapest route is claimed.</p>}</div>)}</div>}</section>
       <section className="next-action" data-testid="next-action-panel"><div className="next-label"><span className="eyebrow">YOUR NEXT STEP</span><span>Step {current + 1} of 16</span></div><h2>{task.title}</h2><p>{task.result}</p>{actionPanel()}</section>
       {proof && <section className="proof-section" data-testid="production-proof-section"><div className="section-heading"><h3>Production proof</h3><a className="text-button" href={`${API}/files/${job.id}/${proof.id}?download`} data-testid="download-print-ready-link"><Download size={15} />Download PDF</a></div><div className="proof-holder"><div className="proof-pages">{Array.from({ length: job.sides }).map((_, index) => <div className="proof-page" key={index}><p>{index ? "Back" : "Front"}</p><img src={`${API}/files/${job.id}/${proof.id}/preview/${index + 1}`} alt={`Proof page ${index + 1}`} data-testid={`proof-page-${index + 1}`} /></div>)}</div></div><div className="file-identity"><ShieldCheck size={15} /><span>Actual generated production file<small data-testid="print-ready-sha">SHA-256 {proof.sha}</small></span></div></section>}
-      {job.inspection && <details className="inspection-details" open data-testid="inspection-details"><summary><AlertTriangle size={16} />Artwork inspection · {job.inspection.errors.length} blocking issue(s)</summary><div>{job.inspection.errors.map((item) => <p className="notice warning" key={item}>{item}</p>)}{job.inspection.warnings.map((item) => <p className="inspection-note" key={item}>{item}</p>)}</div></details>}
+      {job.inspection && <details className="inspection-details" open data-testid="inspection-details"><summary><AlertTriangle size={16} />Artwork inspection · {job.inspection.errors.length} blocking issue(s)</summary><div>{job.inspection.errors.map((item) => <p className="notice warning" key={item}>{item}</p>)}{job.inspection.actions?.map((item) => <p className="inspection-note" key={item}>Corrective action: {item}</p>)}{job.inspection.warnings.map((item) => <p className="inspection-note" key={item}>{item}</p>)}</div></details>}
       <section className="tasks-section"><div className="section-heading"><h3>Production recipe</h3><span>{job.tasks.filter((item) => item.status === "Completed").length} / 16 complete</span></div><div className="task-list">{job.tasks.map((item, index) => <details className={`task ${index === current ? "current" : ""}`} key={item.id}><summary data-testid={`task-${index + 1}-summary`}><span className={`task-number ${item.status === "Completed" ? "done" : ""}`}>{item.status === "Completed" ? <Check size={15} /> : index + 1}</span><span className="task-title">{item.title}<small>{item.party === "Application" ? "Automated check" : "Human confirmation"}</small></span><Badge status={item.status} /></summary><div className="task-details"><p>{item.result}</p><div className="task-meta"><span>Updated {date(item.updated)}</span></div></div></details>)}</div></section>
     </div>
     </div>
@@ -433,6 +433,70 @@ function ConnectorPairing({ settings, reload }) {
       <span>{item.inventory?.hostname || "Windows connector"} · Found</span>
       <button className="button" onClick={() => approve(item.id)} data-testid={`approve-connector-${item.id}`}>Approve</button>
     </div>)}
+    {(settings.pairedDevices || []).map((item) => <div className="version-row" key={item.id} data-testid={`paired-connector-${item.id}`}>
+      <span>{item.inventory?.hostname || "Windows connector"} · {item.status}</span>
+      <span>{item.inventory?.printers?.length || 0} discovered printer(s)</span>
+    </div>)}
+  </section>;
+}
+
+function CostProfiles() {
+  const [profiles, setProfiles] = useState([]);
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const fields = [
+    ["material_per_sheet", "Material / sheet"],
+    ["click_per_side", "Click / side"],
+    ["setup", "Setup"],
+    ["finishing_per_unit", "Finishing / unit"],
+    ["labour_per_hour", "Labour / hour"],
+    ["machine_per_hour", "Machine / hour"],
+    ["waste_percent", "Waste %"],
+    ["outsourcing", "Outsourcing"],
+    ["sell_price_per_unit", "Sell price / unit"],
+  ];
+  const load = async () => {
+    try {
+      setProfiles(await api("cost-profiles"));
+    } catch (reason) {
+      setMessage(reason.message);
+    }
+  };
+  useEffect(() => { load(); }, []);
+  const save = async (event) => {
+    event.preventDefault();
+    setBusy(true);
+    setMessage("");
+    try {
+      await api("cost-profiles", {
+        method: "POST",
+        body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget))),
+      });
+      event.currentTarget.reset();
+      setMessage("Cost profile saved. Attach it to a verified machine plan before comparing routes.");
+      await load();
+    } catch (reason) {
+      setMessage(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <section className="settings-card" data-testid="cost-profiles-panel">
+    <div className="section-heading"><h3>Production cost inputs</h3><PackageCheck /></div>
+    <p>Only configured inputs can support a lowest-cost recommendation.</p>
+    {message && <p className="notice" data-testid="cost-profile-message">{message}</p>}
+    <form onSubmit={save} data-testid="cost-profile-form">
+      <label>Profile name<input name="name" required maxLength="100" data-testid="cost-profile-name-input" /></label>
+      <div className="form-grid">{fields.map(([name, label]) => <label key={name}>{label}
+        <input name={name} type="number" min="0" step="0.0001" required data-testid={`cost-${name}-input`} />
+      </label>)}</div>
+      <button className="primary" disabled={busy} data-testid="save-cost-profile-button">
+        {busy ? "Saving…" : "Save cost inputs"}
+      </button>
+    </form>
+    {profiles.map((profile) => <div className="version-row" key={profile.id} data-testid={`cost-profile-${profile.id}`}>
+      <strong>{profile.name}</strong><span>Configured inputs</span>
+    </div>)}
   </section>;
 }
 
@@ -441,7 +505,7 @@ function Settings({ settings, user, reload }) {
   const [build, setBuild] = useState(null);
   useEffect(() => { api("build-info").then(setBuild).catch(() => setBuild(null)); }, []);
   const save = async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); try { await api("settings", { method: "POST", body: JSON.stringify({ printer: form.get("printer"), stocks: String(form.get("stocks")).split("\n").filter(Boolean), sides: [1, 2], instructions: form.get("instructions") }) }); setMessage("Shop settings saved. Active jobs require a route review."); reload(); } catch (reason) { setMessage(reason.message); } };
-  return <main className="settings-page" data-testid="settings-page"><div className="page-heading"><div><span className="eyebrow">PRINT2GO LONDON</span><h1>Shop settings</h1><p className="muted">Your route, connection and operators.</p></div><Badge status={settings.connected ? "Completed" : "Blocked"} /></div><div className="settings-layout"><div><section className="settings-card"><div className="section-heading"><h3>Production route</h3><Printer /></div>{message && <p className="notice" data-testid="settings-message">{message}</p>}<form onSubmit={save} data-testid="settings-form"><fieldset disabled={user.role !== "admin"}><label>Printer name<input name="printer" defaultValue={settings.printer} data-testid="printer-name-input" /></label><label>Supported stocks<textarea name="stocks" defaultValue={settings.stocks.join("\n")} data-testid="stocks-input" /></label><label>Handoff instructions<textarea name="instructions" defaultValue={settings.instructions} data-testid="handoff-instructions-input" /></label><button className="primary" data-testid="save-settings-button">Save shop settings</button></fieldset></form></section><section className="settings-card"><div className="section-heading"><h3>Connect shop</h3><Link2 /></div><p data-testid="connector-status">{settings.connected ? "The connector reports a writable destination." : "No verified local connection. Production readiness stays blocked."}</p><a className="button" href="/setup/print2go-connector.py" download data-testid="download-connector-link"><Download size={16} />Download local connector</a><details className="technical"><summary data-testid="connector-setup-summary">Connection setup</summary><ol><li>Configure the server and shop computer with the same connector secret.</li><li>Set the HTTPS Studio URL and a writable staging folder.</li><li>Run the connector. It stages authorized PDFs only; it never prints.</li></ol></details></section>{user.role === "admin" && <ConnectorPairing settings={settings} reload={reload} />}{user.role === "admin" && <Operators />}</div><aside className="settings-aside"><ShieldCheck size={26} /><h3>A shop you can trust.</h3><p data-testid="assistant-status">Assistant: {settings.aiConnected ? "configured; first request verifies access" : "server setup needed"}</p><p>Local shop: {settings.connected ? "connected" : "disconnected"}</p><p>RIP integration: operator-assisted.</p>{build && <p data-testid="build-info">Build {build.commit} · {build.builtAt}</p>}</aside></div></main>;
+  return <main className="settings-page" data-testid="settings-page"><div className="page-heading"><div><span className="eyebrow">PRINT2GO LONDON</span><h1>Shop settings</h1><p className="muted">Your route, connection and operators.</p></div><Badge status={settings.connected ? "Completed" : "Blocked"} /></div><div className="settings-layout"><div><section className="settings-card"><div className="section-heading"><h3>Production route</h3><Printer /></div>{message && <p className="notice" data-testid="settings-message">{message}</p>}<form onSubmit={save} data-testid="settings-form"><fieldset disabled={user.role !== "admin"}><label>Printer name<input name="printer" defaultValue={settings.printer} data-testid="printer-name-input" /></label><label>Supported stocks<textarea name="stocks" defaultValue={settings.stocks.join("\n")} data-testid="stocks-input" /></label><label>Handoff instructions<textarea name="instructions" defaultValue={settings.instructions} data-testid="handoff-instructions-input" /></label><button className="primary" data-testid="save-settings-button">Save shop settings</button></fieldset></form></section><section className="settings-card"><div className="section-heading"><h3>Connect shop</h3><Link2 /></div><p data-testid="connector-status">{settings.connected ? "The connector reports a writable destination." : "No verified local connection. Production readiness stays blocked."}</p><a className="button" href="/setup/print2go-connector.py" download data-testid="download-connector-link"><Download size={16} />Download local connector</a><details className="technical"><summary data-testid="connector-setup-summary">Connection setup</summary><ol><li>Configure the server and shop computer with the same connector secret.</li><li>Set the HTTPS Studio URL and a writable staging folder.</li><li>Run the connector. It stages authorized PDFs only; it never prints.</li></ol></details></section>{user.role === "admin" && <ConnectorPairing settings={settings} reload={reload} />}{user.role === "admin" && <CostProfiles />}{user.role === "admin" && <Operators />}</div><aside className="settings-aside"><ShieldCheck size={26} /><h3>A shop you can trust.</h3><p data-testid="assistant-status">Assistant: {settings.aiConnected ? "configured; first request verifies access" : "server setup needed"}</p><p>Local shop: {settings.connected ? "connected" : "disconnected"}</p><p>RIP integration: operator-assisted.</p>{build && <p data-testid="build-info">Build {build.commit} · {build.builtAt}</p>}</aside></div></main>;
 }
 
 function Operators() {
