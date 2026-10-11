@@ -135,6 +135,7 @@ def reset_from(job, index, reason):
         job.pop("verification", None)
     if index <= 3:
         job.pop("bleedDecision", None)
+        job.pop("bleedConfirmation", None)
     record_event(job, reason)
 
 
@@ -152,6 +153,7 @@ async def ensure_collections():
     await db.connector_nonces.create_index("nonce", unique=True)
     await db.executions.create_index([("job_id", 1), ("status", 1)])
     await db.executions.create_index("lease_until")
+    await db.cost_profiles.create_index("id", unique=True)
     await db.bootstrap.update_one(
         {"_id": "first-run"},
         {"$setOnInsert": {"configured": False, "created": now()}},
