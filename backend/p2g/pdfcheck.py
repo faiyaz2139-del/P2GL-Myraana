@@ -166,6 +166,8 @@ def inspect(data, r, sides):
             actions.append("Embed fonts or convert approved text to outlines before export.")
         elif "annotations" in error:
             actions.append("Flatten comments, links, and annotations before export.")
+        elif "dpi at its placed size" in error:
+            actions.append("Replace low-resolution images with artwork meeting the recipe minimum DPI at final print size.")
     return {"pages": pages, "errors": errors, "warnings": warnings, "actions": list(dict.fromkeys(actions)), "bleed": bleed,
             "engine": "PyMuPDF (MuPDF) text/image tracing + pypdf structure inspection", "at": datetime.now(timezone.utc).isoformat()}
 
