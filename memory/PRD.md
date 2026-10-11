@@ -152,6 +152,13 @@ Myraana and never send a print command or claim physical production completed.
   report `iteration_13.json` passed navigation, connector/cost controls, all
   16 task summaries, build metadata, and advisory review rendering. Production
   was not deployed, modified, or tested.
+- Final read-only verification: current source `a1c57e6` retains checkpoint
+  `8b6f695` as an ancestor. Existing isolated evidence remains 35 PASS / 0 FAIL,
+  including invalid/expired pairing rejection, administrator pairing approval,
+  read-only heartbeat/reconnect, auditable cost estimation, PRINT_READY checksum
+  verification, QC blocking, and disabled physical printing. Windows source,
+  pinned requirements, and the Windows GitHub Actions workflow are present; the
+  workflow was not triggered and no Windows artifact/hardware proof exists.
 
 ## Prioritized Backlog
 
