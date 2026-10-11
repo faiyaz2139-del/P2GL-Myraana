@@ -65,6 +65,12 @@ jobs:
             Write-Output "SHA256: $($hash.Hash)"
           }
 
+      - name: Smoke-test executable without network or printing
+        run: |
+          $exe = Join-Path $env:CONNECTOR_DIR "dist\MyraanaConnector\MyraanaConnector.exe"
+          if (-not (Test-Path $exe)) { throw "Connector executable missing" }
+          python -c "import os,subprocess,sys; env=os.environ.copy(); env['MYRAANA_URL']='http://invalid.invalid'; p=subprocess.run([sys.argv[1]],env=env,capture_output=True,text=True,timeout=30); output=p.stdout+p.stderr; print(output[-1500:]); assert p.returncode != 0 and 'A valid HTTPS Myraana website URL is required.' in output, 'Connector runtime smoke test failed'" "$exe"
+
       - name: Upload unsigned preview installer
         uses: actions/upload-artifact@v4
         with:
