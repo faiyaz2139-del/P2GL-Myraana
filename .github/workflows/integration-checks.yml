@@ -36,7 +36,7 @@ jobs:
           node-version: "22"
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm install --no-audit --no-fund
+        run: npm install --legacy-peer-deps --no-audit --no-fund
       - name: Compile frontend
         working-directory: frontend
         env:
