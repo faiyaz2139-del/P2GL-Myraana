@@ -69,6 +69,10 @@ class OptimizationAgent(BaseAgent):
         if not valid:
             return stop('No measured production plan passes all constraints.', rejected=rejected)
         priced = [item for item in valid if item.get("cost_estimate")]
+        if priced and len(priced) != len(valid):
+            return stop("Some eligible production plans lack verified cost profiles; no cheapest monetary route can be claimed.",
+                        unpriced_plans=[item["plan_id"] for item in valid if not item.get("cost_estimate")],
+                        rejected=rejected, money_cost="UNKNOWN")
         if priced:
             priced.sort(key=lambda item: (item["cost_estimate"]["total"], item["plan_id"]))
             return AgentResult(job_id=job.job_id, agent=self.name, status=AgentStatus.PASS,
