@@ -112,6 +112,23 @@ async def pairings():
     return records
 
 
+async def devices():
+    records = await db.connector_devices.find(
+        {},
+        {"credential_hash": 0},
+    ).to_list(50)
+    current = datetime.now(timezone.utc)
+    for record in records:
+        record["id"] = record.pop("_id")
+        last_seen = record.get("lastSeen")
+        try:
+            fresh = current - datetime.fromisoformat(last_seen) <= timedelta(seconds=90)
+        except (TypeError, ValueError):
+            fresh = False
+        record["status"] = "Connected" if record.get("enabled") and fresh else "Offline"
+    return records
+
+
 async def heartbeat(request, payload):
     credential = request.headers.get("authorization", "").removeprefix("Bearer ")
     device = await db.connector_devices.find_one({"credential_hash": _digest(credential), "enabled": True})
