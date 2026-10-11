@@ -159,6 +159,14 @@ Myraana and never send a print command or claim physical production completed.
   verification, QC blocking, and disabled physical printing. Windows source,
   pinned requirements, and the Windows GitHub Actions workflow are present; the
   workflow was not triggered and no Windows artifact/hardware proof exists.
+- GitHub synchronization check: the local workspace has no Git remote configured,
+  so the connected repository and remote branch cannot be identified or compared
+  here and no push was attempted. Required Myraana workflow, cost/preflight/QC,
+  connector, and test files are present. A non-value credential pattern scan found
+  two reference-only paths (`reference/lib/production/providers.ts` and
+  `reference/tests/providers.mjs`) that must be reviewed/removed from the export
+  scope before a GitHub synchronization. Existing isolated E2E evidence remains
+  35 PASS / 0 FAIL; no test was rerun because no source change occurred.
 
 ## Prioritized Backlog
 
