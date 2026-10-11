@@ -134,6 +134,39 @@ Myraana and never send a print command or claim physical production completed.
   Git worktree. The hook now fails open with a non-sensitive warning; local
   `yarn build` passed afterward. No redeploy was initiated, and the earlier live
   production run remains unaffected.
+- Production automation completion (preview/isolated only): added a validated,
+  auditable configured-cost calculator (`p2g/costing.py`), cost-profile API and
+  Settings controls, and cost-aware optimization that never claims a cheapest
+  route when inputs are unavailable. Added detailed preflight corrective actions,
+  made below-recipe image resolution a blocking condition, and preserved original
+  artwork plus safe PRINT_READY/verification lineage.
+- Review and connector safeguards: aligned recorded blank-border decisions and
+  approval/authorization provenance with the advisory agent schema; paired-device
+  health is displayed separately from production readiness. Rotated the preview
+  connector credential after local exposure. Windows hardware, DPAPI, spooler,
+  executable, Fiery, and physical printing remain unverified and intentionally
+  outside preview testing.
+- Verification evidence: dependency-free backend suite passed including six
+  direct preflight fixtures; isolated API runner reported 35 PASS / 0 FAIL with
+  one intentionally NOT TESTED physical-QC completion; independent UI acceptance
+  report `iteration_13.json` passed navigation, connector/cost controls, all
+  16 task summaries, build metadata, and advisory review rendering. Production
+  was not deployed, modified, or tested.
+- Final read-only verification: current source `a1c57e6` retains checkpoint
+  `8b6f695` as an ancestor. Existing isolated evidence remains 35 PASS / 0 FAIL,
+  including invalid/expired pairing rejection, administrator pairing approval,
+  read-only heartbeat/reconnect, auditable cost estimation, PRINT_READY checksum
+  verification, QC blocking, and disabled physical printing. Windows source,
+  pinned requirements, and the Windows GitHub Actions workflow are present; the
+  workflow was not triggered and no Windows artifact/hardware proof exists.
+- GitHub synchronization check: the local workspace has no Git remote configured,
+  so the connected repository and remote branch cannot be identified or compared
+  here and no push was attempted. Required Myraana workflow, cost/preflight/QC,
+  connector, and test files are present. A non-value credential pattern scan found
+  two reference-only paths (`reference/lib/production/providers.ts` and
+  `reference/tests/providers.mjs`) that must be reviewed/removed from the export
+  scope before a GitHub synchronization. Existing isolated E2E evidence remains
+  35 PASS / 0 FAIL; no test was rerun because no source change occurred.
 
 ## Prioritized Backlog
 
