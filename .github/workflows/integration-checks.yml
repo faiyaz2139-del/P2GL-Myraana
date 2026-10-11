@@ -36,7 +36,10 @@ jobs:
           node-version: "22"
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm install --legacy-peer-deps --no-audit --no-fund
+        run: |
+          npm install --legacy-peer-deps --no-audit --no-fund
+          npm install --no-save --legacy-peer-deps --no-audit --no-fund ajv@8.17.1 ajv-keywords@5.1.0
+          node -e "require('ajv-keywords'); require('ajv/dist/compile/codegen')"
       - name: Compile frontend
         working-directory: frontend
         env:
