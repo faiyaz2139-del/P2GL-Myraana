@@ -22,9 +22,11 @@ from p2g.connector_pairing import (
     claim_pairing,
     create_pairing,
     heartbeat as paired_heartbeat,
+    devices as paired_devices,
     pairings,
     pairing_status,
 )
+from p2g.costing import CostValidationError, cost_profile
 from p2g.core import AppError, db, new_id, now
 from p2g.pdfcheck import render_page
 from p2g.workflow import (
@@ -238,6 +240,7 @@ async def settings(request: Request):
         "agent": agent,
         "connected": bool(agent and agent.get("writable")),
         "pairings": await pairings(),
+        "pairedDevices": await paired_devices(),
     }
 
 
@@ -315,6 +318,25 @@ async def update_settings(request: Request):
             )
             await save_job(job)
     return {"ok": True}
+
+
+@api.get("/cost-profiles")
+async def list_cost_profiles(request: Request):
+    require_admin(await current_user(request))
+    return await db.cost_profiles.find({}, {"_id": 0}).sort("created", -1).to_list(100)
+
+
+@api.post("/cost-profiles")
+async def save_cost_profile(request: Request):
+    assert_origin(request)
+    user = require_admin(await current_user(request))
+    try:
+        profile = cost_profile(await request.json())
+    except CostValidationError as error:
+        raise AppError(str(error), 400) from error
+    profile.update({"id": new_id(), "created": now(), "created_by": user["id"]})
+    await db.cost_profiles.insert_one(profile.copy())
+    return public(profile)
 
 
 @api.get("/users")
@@ -484,6 +506,13 @@ async def job_action(job_id: str, request: Request):
         if job.get("inspection", {}).get("bleed") != "missing" or payload.get("decision") != "blank-border":
             raise AppError("Choose a corrected PDF or explicitly accept a blank border.")
         job["bleedDecision"] = "blank-border"
+        job["bleedConfirmation"] = {
+            "actor_id": user["id"],
+            "actor_name": user["name"],
+            "at": now(),
+            "generation": job["generation"],
+            "original_file_id": latest(job, "ORIGINAL")["id"],
+        }
         update_task(job, 3, "Completed", "Blank border outside trim accepted; content is not stretched.", user["name"])
     elif action == "approve":
         require_completed(job, 7)

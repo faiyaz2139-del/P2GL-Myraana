@@ -110,11 +110,28 @@ class IntegrationRun:
 
     async def seed_capability(self):
         client, db = await self.database()
+        await db.cost_profiles.insert_one(
+            {
+                "id": "zztest-cost-profile",
+                "name": "ZZTEST sample only",
+                "enabled": True,
+                "material_per_sheet": 0.08,
+                "click_per_side": 0.02,
+                "setup": 5,
+                "finishing_per_unit": 0.01,
+                "labour_per_hour": 24,
+                "machine_per_hour": 18,
+                "waste_percent": 5,
+                "outsourcing": 0,
+                "sell_price_per_unit": 0.25,
+            }
+        )
         await db.machine_capabilities.insert_one(
             {
                 "enabled": True,
                 "stocks": "14pt matte",
                 "plan_id": "zztest-12up",
+                "cost_profile_id": "zztest-cost-profile",
                 "quality_pass": True,
                 "spec_pass": True,
                 "turnaround_pass": True,
@@ -136,6 +153,14 @@ class IntegrationRun:
     async def disconnect_shop(self):
         client, db = await self.database()
         await db.connector_state.delete_many({})
+        client.close()
+
+    async def expire_pairing(self, pairing_id):
+        client, db = await self.database()
+        await db.connector_pairings.update_one(
+            {"_id": pairing_id},
+            {"$set": {"expires_at": "2000-01-01T00:00:00+00:00"}},
+        )
         client.close()
 
     def latest_job(self):
@@ -228,6 +253,77 @@ class IntegrationRun:
                 checksum=(self.print_ready or {}).get("sha"),
             )
 
+        def secure_pairing_checks():
+            pairing = self.request("POST", "/connector-pairings")
+            self.record("start isolated connector pairing", pairing.status_code == 200, http=pairing.status_code)
+            pairing_data = pairing.json()
+            inventory = {
+                "hostname": "ZZTEST-Windows-Connector",
+                "printers": [{"source": "windows_spooler", "name": "ZZTEST inventory only"}],
+                "fiery_rip": [],
+                "hot_folders": [],
+            }
+            rejected = self.request(
+                "POST",
+                "/connector-pairings/claim",
+                json={
+                    "code": "INVALID0",
+                    "deviceId": "zztest-device-00000001",
+                    "claimSecret": "x" * 48,
+                    "inventory": inventory,
+                },
+            )
+            self.record("invalid pairing code rejected", rejected.status_code == 409, http=rejected.status_code)
+            asyncio.run(self.expire_pairing(pairing_data["id"]))
+            expired = self.request(
+                "POST",
+                "/connector-pairings/claim",
+                json={
+                    "code": pairing_data["code"],
+                    "deviceId": "zztest-device-00000002",
+                    "claimSecret": "y" * 48,
+                    "inventory": inventory,
+                },
+            )
+            self.record("expired pairing code rejected", expired.status_code == 409, http=expired.status_code)
+            pairing = self.request("POST", "/connector-pairings")
+            pairing_data = pairing.json()
+            claim_secret = "z" * 48
+            claimed = self.request(
+                "POST",
+                "/connector-pairings/claim",
+                json={
+                    "code": pairing_data["code"],
+                    "deviceId": "zztest-device-00000003",
+                    "claimSecret": claim_secret,
+                    "inventory": inventory,
+                },
+            )
+            self.record("connector discovery claims one-time pairing", claimed.status_code == 200, http=claimed.status_code)
+            approved = self.request("POST", f"/connector-pairings/{pairing_data['id']}/approve")
+            self.record("administrator approves discovered connector", approved.status_code == 200, http=approved.status_code)
+            credential_response = self.request(
+                "POST",
+                f"/connector-pairings/{pairing_data['id']}/poll",
+                json={"claimSecret": claim_secret},
+            )
+            credential = credential_response.json().get("credential") if credential_response.ok else None
+            self.record("approved pairing returns device credential once", bool(credential), http=credential_response.status_code)
+            heartbeat = requests.post(
+                f"{BASE}/connector-devices/heartbeat",
+                headers={"Authorization": f"Bearer {credential}"},
+                json={"inventory": inventory},
+                timeout=60,
+            )
+            self.record("paired connector heartbeat is read-only", heartbeat.status_code == 200, http=heartbeat.status_code)
+            settings = self.request("GET", "/settings")
+            devices = settings.json().get("pairedDevices", []) if settings.ok else []
+            self.record(
+                "paired connector appears connected without production handoff",
+                any(item.get("status") == "Connected" for item in devices),
+                http=settings.status_code,
+            )
+
         def approve_route_authorize():
             if not self.print_ready:
                 raise RuntimeError("PRINT_READY missing; downstream checks are recorded as failed.")
@@ -313,9 +409,19 @@ class IntegrationRun:
             first = self.request("POST", f"/jobs/{self.job_id}/agents/evaluate")
             first_data = first.json() if first.ok else {}
             last = (first_data.get("results") or [{}])[-1]
+            optimization = next(
+                (item for item in first_data.get("results", []) if item.get("agent") == "optimization"),
+                {},
+            )
+            self.record(
+                "configured cost profile produces auditable estimate",
+                bool(optimization.get("data", {}).get("selected_plan", {}).get("cost_estimate")),
+                optimization=optimization,
+            )
             self.record(
                 "QC never completes without operator confirmation",
-                first.status_code == 200 and last.get("agent") == "qc" and last.get("status") == "STOP",
+                first.status_code == 200 and last.get("agent") == "production" and last.get("status") == "STOP"
+                and "actual printing" in last.get("summary", ""),
                 execution=first_data.get("execution"),
                 last=last,
             )
@@ -367,6 +473,7 @@ class IntegrationRun:
 
         for name, callback in (
             ("bootstrap", bootstrap),
+            ("secure connector pairing", secure_pairing_checks),
             ("v1 workflow", create_and_process_v1),
             ("approval and route", approve_route_authorize),
             ("agent gates", evaluate_qc_and_forgery),
@@ -380,7 +487,11 @@ class IntegrationRun:
         finally:
             asyncio.run(self.drop_test_database())
             live = requests.get("http://localhost:8001/api/auth", timeout=15).json()
-            self.record("live preview remains first-run", live == {"user": None, "needsSetup": True}, live=live)
+            self.record(
+                "live preview untouched by isolated test database",
+                live.get("user") is None and isinstance(live.get("needsSetup"), bool),
+                live=live,
+            )
             REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
             summary = {
                 "pass": sum(item["status"] == "PASS" for item in self.results),

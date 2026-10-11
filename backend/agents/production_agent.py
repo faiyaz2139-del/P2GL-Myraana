@@ -25,7 +25,7 @@ class ProductionAgent(BaseAgent):
         elif not job.human_authorized or not confirmation_matches(job.production.get('authorization'), job):
             reason = 'Human authorization for this exact job version is required.'
         elif not job.connector_ready:
-            reason = 'Check the shop connector and destination readiness.'
+            reason = 'Disconnected or stale connector.'
         elif job.production.get('mode') != 'LIVE_OPERATOR_ASSISTED':
             reason = 'Select a live operator-assisted route. Simulation is separate from live production.'
         elif not confirmation_matches(job.production.get('printed'), job):

@@ -136,7 +136,10 @@ def inspect(data, r, sides):
                 cs = {1: "Gray", 3: "RGB", 4: "CMYK"}.get(info.get("colorspace"), str(info.get("colorspace")))
                 images.append({"pixels": [info["width"], info["height"]], "placedInches": [round(pw, 3), round(ph, 3)], "dpi": round(dpi, 1), "colourSpace": cs})
                 if dpi < r["minDpi"]:
-                    warnings.append(f"Page {i+1}: an image measures {dpi:.0f} dpi at its placed size; target is {r['minDpi']} dpi.")
+                    errors.append(
+                        f"Page {i+1}: an image measures {dpi:.0f} dpi at its placed size; "
+                        f"minimum is {r['minDpi']} dpi. Replace it with higher-resolution artwork."
+                    )
         forms = [x for x in mp.get_xobjects()]
         if forms:
             warnings.append(f"Page {i+1}: {len(forms)} form XObject(s) (nested content). Text and images inside were traced, but nested artwork needs visual review.")
@@ -149,7 +152,21 @@ def inspect(data, r, sides):
     warnings.append(LIMITS)
     if bleed == "correct":
         warnings.append("Page size includes bleed. This cannot prove the design extends to every bleed edge; confirm visually.")
-    return {"pages": pages, "errors": list(dict.fromkeys(errors)), "warnings": list(dict.fromkeys(warnings)), "bleed": bleed,
+    errors = list(dict.fromkeys(errors))
+    warnings = list(dict.fromkeys(warnings))
+    actions = []
+    for error in errors:
+        if "page(s)" in error:
+            actions.append("Export the front and back as one PDF with the required page count.")
+        elif "does not match the recipe" in error:
+            actions.append("Export at the exact finished size plus bleed; do not scale artwork in Myraana.")
+        elif "safe margin" in error:
+            actions.append("Move essential text and logos inward, then upload a revised PDF.")
+        elif "not embedded" in error:
+            actions.append("Embed fonts or convert approved text to outlines before export.")
+        elif "annotations" in error:
+            actions.append("Flatten comments, links, and annotations before export.")
+    return {"pages": pages, "errors": errors, "warnings": warnings, "actions": list(dict.fromkeys(actions)), "bleed": bleed,
             "engine": "PyMuPDF (MuPDF) text/image tracing + pypdf structure inspection", "at": datetime.now(timezone.utc).isoformat()}
 
 
