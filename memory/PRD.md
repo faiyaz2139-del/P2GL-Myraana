@@ -134,6 +134,24 @@ Myraana and never send a print command or claim physical production completed.
   Git worktree. The hook now fails open with a non-sensitive warning; local
   `yarn build` passed afterward. No redeploy was initiated, and the earlier live
   production run remains unaffected.
+- Production automation completion (preview/isolated only): added a validated,
+  auditable configured-cost calculator (`p2g/costing.py`), cost-profile API and
+  Settings controls, and cost-aware optimization that never claims a cheapest
+  route when inputs are unavailable. Added detailed preflight corrective actions,
+  made below-recipe image resolution a blocking condition, and preserved original
+  artwork plus safe PRINT_READY/verification lineage.
+- Review and connector safeguards: aligned recorded blank-border decisions and
+  approval/authorization provenance with the advisory agent schema; paired-device
+  health is displayed separately from production readiness. Rotated the preview
+  connector credential after local exposure. Windows hardware, DPAPI, spooler,
+  executable, Fiery, and physical printing remain unverified and intentionally
+  outside preview testing.
+- Verification evidence: dependency-free backend suite passed including six
+  direct preflight fixtures; isolated API runner reported 35 PASS / 0 FAIL with
+  one intentionally NOT TESTED physical-QC completion; independent UI acceptance
+  report `iteration_13.json` passed navigation, connector/cost controls, all
+  16 task summaries, build metadata, and advisory review rendering. Production
+  was not deployed, modified, or tested.
 
 ## Prioritized Backlog
 
