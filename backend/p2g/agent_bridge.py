@@ -28,6 +28,12 @@ async def build_job_state(job):
         {"enabled": True, "stocks": job["stock"]},
         {"_id": 0},
     ).to_list(100)
+    profiles = await db.cost_profiles.find({"enabled": True}, {"_id": 0}).to_list(100)
+    profiles_by_id = {profile["id"]: profile for profile in profiles}
+    for capability in capabilities:
+        profile = profiles_by_id.get(capability.get("cost_profile_id"))
+        if profile:
+            capability["cost_profile"] = profile
     verified = bool(
         print_ready
         and verification.get("fileId") == print_ready["id"]
@@ -56,8 +62,26 @@ async def build_job_state(job):
         and "pdf-hot-folder" in agent.get("capabilities", [])
     )
     qc = job.get("qc") or {}
+    bleed_confirmation = job.get("bleedConfirmation") or {}
+    proof_approval = {
+        "confirmed": approval_matches,
+        "actor_id": approval.get("actor"),
+        "confirmed_at": approval.get("at"),
+        "file_id": approval.get("fileId"),
+        "checksum": approval.get("sha"),
+        "generation": approval.get("generation"),
+    }
+    production_authorization = {
+        "confirmed": authorization_matches,
+        "actor_id": authorization.get("actor"),
+        "confirmed_at": authorization.get("at"),
+        "file_id": authorization.get("fileId"),
+        "checksum": authorization.get("sha"),
+        "generation": authorization.get("generation"),
+    }
     return JobState(
         job_id=job["id"],
+        generation=job["generation"],
         product="business_card",
         quantity=job["quantity"],
         order_spec={"stock": job["stock"], "finish": job["finish"], "sides": job["sides"]},
@@ -66,7 +90,11 @@ async def build_job_state(job):
             "measured": job["tasks"][2]["status"] == "Completed",
             "unsafe_content": bool(inspection.get("errors")),
             "bleed_ok": inspection.get("bleed") == "correct",
-            "bleed_decision": job.get("bleedDecision"),
+            "bleed_decision": "preserve_design_with_border"
+            if job.get("bleedDecision") == "blank-border" else job.get("bleedDecision"),
+            "decision_actor_id": bleed_confirmation.get("actor_id"),
+            "decision_at": bleed_confirmation.get("at"),
+            "decision_original_file_id": bleed_confirmation.get("original_file_id"),
             "dpi_warning": next((item for item in inspection.get("warnings", []) if "dpi" in item.lower()), None),
             "pages": inspection.get("pages", []),
         },
@@ -77,7 +105,13 @@ async def build_job_state(job):
         },
         recipe={"product": "business_card", **job["recipe"]},
         optimization={"candidate_plans": capabilities},
-        production={"route": job.get("route"), "readiness": job.get("readiness")},
+        production={
+            "route": job.get("route"),
+            "readiness": job.get("readiness"),
+            "proof_approval": proof_approval,
+            "authorization": production_authorization,
+            "mode": "LIVE_OPERATOR_ASSISTED" if job.get("route") else None,
+        },
         qc=qc,
         approved_file_id=approval.get("fileId") if approval_matches else None,
         approved_checksum=approval.get("sha") if approval_matches else None,
