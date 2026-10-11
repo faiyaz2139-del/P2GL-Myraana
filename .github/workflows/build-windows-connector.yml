@@ -57,7 +57,13 @@ jobs:
           if ($executables.Count -eq 0) {
             throw "No Windows executable was created."
           }
-          $executables | ForEach-Object { Write-Output $_.FullName }
+          $executables | ForEach-Object {
+            if ($_.Length -lt 1024) { throw "Connector executable is unexpectedly small: $($_.FullName)" }
+            $hash = Get-FileHash -Path $_.FullName -Algorithm SHA256
+            Write-Output "Executable: $($_.FullName)"
+            Write-Output "Size: $($_.Length) bytes"
+            Write-Output "SHA256: $($hash.Hash)"
+          }
 
       - name: Upload unsigned preview installer
         uses: actions/upload-artifact@v4
