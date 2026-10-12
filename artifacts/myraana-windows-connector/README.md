@@ -1,48 +1,32 @@
-# Myraana Windows Connector — Preview Handoff
+# Myraana Windows Connector — Preview
 
-This preview connector performs read-only Windows printer discovery, secure pairing,
-and outbound HTTPS heartbeats. It never prints, creates test pages, changes printer
-settings, releases jobs, or writes to hot folders.
+1. Download and extract the Windows build ZIP.
+2. Open `MyraanaConnector/MyraanaConnector.exe`.
+3. Paste your Myraana preview website and its pairing code into the setup window.
+4. Click **Connect**, then approve the displayed computer in Myraana.
+5. Wait for **Connected**. Keep the window open while using the connection.
 
-## Package contents
+The website is remembered. On subsequent launches, click **Connect** with the code
+blank to reconnect. If the connection is interrupted, it retries automatically.
+Closing the window stops the connector.
 
-- `myraana-connector.py` — connector source.
-- `build-myraana-connector.ps1` — unsigned preview PyInstaller build script.
-- `requirements.txt` — pinned build dependencies.
-- `HARDWARE_TEST.md` — read-only acceptance procedure.
+This unsigned preview discovers installed Windows printers and sends health
+checks. It cannot print, change printer settings, release jobs or write to hot
+folders. Use an authorized preview environment for testing.
 
-## Build on an authorized Windows 10/11 x64 computer
+Pairing codes are cleared from the setup form when connection starts. Credentials
+are stored in Windows Credential Manager. Do not save codes or credentials in files.
 
-1. Install Python 3.11 or 3.12 for the current Windows user.
-2. Open PowerShell in this extracted folder.
-3. Run:
+A connection is bound to its saved website. Changing the website requires a
+separate installation profile. Older credentials without a recorded website need
+migration; they are never automatically sent to an unconfirmed host.
 
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-python -m pip install -r requirements.txt
-.\build-myraana-connector.ps1
-```
+## Build from source
 
-The unsigned preview executable is created at
-`dist\MyraanaConnector\MyraanaConnector.exe`. Do not distribute it beyond preview
-testing. Production distribution requires an Authenticode-signed installer.
+On Windows with Python 3.12, run `build-myraana-connector.ps1` from the source
+folder. The output is `dist/MyraanaConnector/MyraanaConnector.exe`.
 
-## Pair with Myraana preview
-
-1. Sign in to the authorized Myraana **preview** shop administrator account.
-2. Open **Shop settings → Connect Windows Connector** and select **Pair connector**.
-3. Download the connector and start it with these process-only variables:
-
-```powershell
-$env:MYRAANA_URL = "https://YOUR-PREVIEW-HOST"
-$env:MYRAANA_PAIRING_CODE = "CODE-SHOWN-IN-MYRAANA"
-.\dist\MyraanaConnector\MyraanaConnector.exe
-```
-
-4. Review the discovered Windows printer name in Myraana and approve the pairing.
-5. The connector stores its device credential in Windows Credential Manager, then
-   sends outbound HTTPS heartbeats every 30 seconds. It retries automatically after
-   restart or network loss.
-
-Never place pairing codes, credentials, or server secrets in scripts, source files,
-shared documents, or command history.
+The CI build runs mocked pairing and reconnection tests and opens/closes the
+packaged setup window without network or printer access. Actual shop printer
+discovery, pairing approval and restart recovery still require the hardware
+acceptance procedure in `HARDWARE_TEST.md`.

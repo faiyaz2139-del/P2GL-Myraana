@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "frontend/public/setup/**"
+      - "artifacts/myraana-windows-connector/**"
       - ".github/workflows/build-windows-connector.yml"
   push:
     branches:
@@ -41,6 +42,9 @@ jobs:
       - name: Install pinned build dependencies
         run: python -m pip install --requirement $env:REQUIREMENTS_FILE
 
+      - name: Test setup and pairing without network or printers
+        run: python artifacts/myraana-windows-connector/test_connector_setup.py
+
       - name: Build unsigned preview executable
         run: |
           Set-Location $env:CONNECTOR_DIR
@@ -69,7 +73,7 @@ jobs:
         run: |
           $exe = Join-Path $env:CONNECTOR_DIR "dist\MyraanaConnector\MyraanaConnector.exe"
           if (-not (Test-Path $exe)) { throw "Connector executable missing" }
-          python -c "import os,subprocess,sys; env=os.environ.copy(); env['MYRAANA_URL']='http://invalid.invalid'; p=subprocess.run([sys.argv[1]],env=env,capture_output=True,text=True,timeout=30); output=p.stdout+p.stderr; print(output[-1500:]); assert p.returncode != 0 and 'A valid HTTPS Myraana website URL is required.' in output, 'Connector runtime smoke test failed'" "$exe"
+          python -c "import subprocess,sys; p=subprocess.run([sys.argv[1],'--self-test'],capture_output=True,text=True,timeout=30); print(p.stdout+p.stderr); assert p.returncode == 0, 'Connector setup window smoke test failed'" "$exe"
 
       - name: Upload unsigned preview installer
         uses: actions/upload-artifact@v4

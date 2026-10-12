@@ -3,7 +3,11 @@
 This program never prints, creates test pages, changes printer settings, or writes
 to hot folders. Build on Windows with the adjacent PowerShell script.
 """
+import argparse
 import json
+import queue
+import threading
+import urllib.parse
 import os
 import platform
 import secrets
@@ -19,7 +23,6 @@ except ImportError:
     keyring = None
 
 
-API_URL = os.environ.get("MYRAANA_URL", "").rstrip("/") + "/api"
 STATE_PATH = os.path.join(os.environ.get("LOCALAPPDATA", "."), "Myraana", "connector.json")
 SERVICE = "MyraanaConnector"
 
@@ -75,53 +78,181 @@ def inventory():
             "fiery_rip": [], "hot_folders": []}
 
 
-def request(path, payload, credential=None):
+def request(api_url, path, payload, credential=None):
     headers = {"Content-Type": "application/json"}
     if credential:
         headers["Authorization"] = f"Bearer {credential}"
     body = json.dumps(payload).encode("utf-8")
-    call = urllib.request.Request(API_URL + path, data=body, headers=headers)
+    call = urllib.request.Request(api_url + path, data=body, headers=headers)
     with urllib.request.urlopen(call, timeout=20) as response:
         return json.load(response)
 
 
-def run():
+def website_url(value):
+    value = value.strip().rstrip("/")
+    parsed = urllib.parse.urlsplit(value)
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username
+            or parsed.password or parsed.query or parsed.fragment
+            or parsed.path not in ("", "/")):
+        raise ValueError("A valid HTTPS Myraana website URL is required.")
+    return value
+
+
+def run(url=None, code=None, report=print, stop=None):
+    stop = stop or threading.Event()
     state = load_state()
     state.setdefault("deviceId", str(uuid.uuid4()))
+    url = website_url(url or os.environ.get("MYRAANA_URL", "")
+                      or state.get("websiteUrl", "")
+                      or input("Enter your Myraana HTTPS website URL: "))
+    if state.get("websiteUrl") and state["websiteUrl"] != url:
+        raise ValueError("This connector is already linked to a different website.")
+    api_url = url + "/api"
     claim_secret = secret("claimSecret") or secret("claimSecret", secrets.token_urlsafe(48))
     credential = secret("credential")
+    # Older installations do not record their host. Require a new pairing rather
+    # than transmitting an existing bearer token to an unconfirmed website.
+    if credential and not state.get("websiteUrl"):
+        raise ValueError("Existing connection needs migration before using this setup window.")
+    state["websiteUrl"] = url
     state.pop("claimSecret", None)
     state.pop("credential", None)
     save_state(state)
-    while True:
+    code = (code or os.environ.get("MYRAANA_PAIRING_CODE", "")).strip().upper()
+    while not stop.is_set():
         try:
-            if not credential:
-                code = os.environ.get("MYRAANA_PAIRING_CODE", "").strip().upper()
-                if not code:
-                    print("Needs Attention: enter the one-time code shown in Myraana.")
-                    time.sleep(15)
-                    continue
-                claimed = request("/connector-pairings/claim", {
-                    "code": code, "deviceId": state["deviceId"],
-                    "claimSecret": claim_secret, "inventory": inventory(),
-                })
-                state["pairingId"] = claimed["id"]
-                save_state(state)
-                print("Found: awaiting Myraana administrator approval.")
-            result = request(
-                f"/connector-pairings/{state['pairingId']}/poll",
-                {"claimSecret": state["claimSecret"]},
-            )
-            if result.get("credential"):
-                credential = secret("credential", result["credential"])
             if credential:
-                request("/connector-devices/heartbeat", {"inventory": inventory()}, credential)
-                print("Connected: discovery and health check complete. No print actions are available.")
-            time.sleep(30)
-        except (urllib.error.URLError, urllib.error.HTTPError, KeyError):
-            print("Offline: retrying automatically. No print actions are available.")
-            time.sleep(30)
+                request(api_url, "/connector-devices/heartbeat",
+                        {"inventory": inventory()}, credential)
+                report("Connected. Printer discovery and health check complete.")
+            else:
+                if not state.get("pairingId"):
+                    if not code:
+                        raise ValueError("Enter the pairing code shown in Myraana.")
+                    claimed = request(api_url, "/connector-pairings/claim", {
+                        "code": code, "deviceId": state["deviceId"],
+                        "claimSecret": claim_secret, "inventory": inventory(),
+                    })
+                    state["pairingId"] = claimed["id"]
+                    save_state(state)
+                    report("Printer found. Approve this computer in Myraana.")
+                result = request(api_url,
+                    f"/connector-pairings/{state['pairingId']}/poll",
+                    {"claimSecret": claim_secret},
+                )
+                if result.get("credential"):
+                    credential = secret("credential", result["credential"])
+                    state.pop("pairingId", None)
+                    save_state(state)
+                    report("Approved. Checking connection...")
+            stop.wait(30)
+        except urllib.error.HTTPError as error:
+            if error.code == 409 and not credential and state.get("pairingId"):
+                state.pop("pairingId", None)
+                save_state(state)
+                raise ValueError("Pairing expired. Create a new code in Myraana and connect again.")
+            if error.code in (400, 401, 403, 404):
+                raise ValueError(f"Connection needs attention (HTTP {error.code}). Check your website and pairing code.")
+            report(f"Service unavailable (HTTP {error.code}). Retrying automatically.")
+            stop.wait(30)
+        except (urllib.error.URLError, KeyError, OSError) as error:
+            report(f"Offline or waiting for service ({type(error).__name__}). Retrying automatically.")
+            stop.wait(30)
+
+
+def setup_window(self_test=False):
+    import tkinter as tk
+    from tkinter import ttk
+
+    root = tk.Tk()
+    root.title("Myraana Connector — Preview")
+    root.geometry("560x370")
+    root.resizable(False, False)
+    frame = ttk.Frame(root, padding=24)
+    frame.pack(fill="both", expand=True)
+    ttk.Label(frame, text="Connect your Windows computer",
+              font=("Segoe UI", 16, "bold")).pack(anchor="w")
+    ttk.Label(frame, text="Use your Myraana preview website and its pairing code.").pack(anchor="w", pady=(8, 18))
+    state = load_state()
+    ttk.Label(frame, text="Myraana preview website").pack(anchor="w")
+    url = tk.StringVar(value=os.environ.get("MYRAANA_URL") or state.get("websiteUrl", ""))
+    url_entry = ttk.Entry(frame, textvariable=url, width=64)
+    url_entry.pack(fill="x", pady=(4, 12))
+    ttk.Label(frame, text="Pairing code (leave blank when reconnecting)").pack(anchor="w")
+    code = tk.StringVar(value=os.environ.get("MYRAANA_PAIRING_CODE", ""))
+    code_entry = ttk.Entry(frame, textvariable=code, show="*", width=64)
+    code_entry.pack(fill="x", pady=(4, 12))
+    status = tk.StringVar(value="Ready to connect.")
+    events = queue.Queue()
+    stop = threading.Event()
+    worker = None
+
+    def work(address, pairing_code):
+        try:
+            run(address, pairing_code, lambda message: events.put(("status", message)), stop)
+        except Exception as error:
+            message = str(error) if isinstance(error, (ValueError, RuntimeError)) else "Setup could not complete. Check your connection and try again."
+            events.put(("error", message))
+        finally:
+            events.put(("done", ""))
+
+    def connect():
+        nonlocal worker
+        try:
+            address = website_url(url.get())
+        except ValueError as error:
+            status.set(str(error))
+            return
+        stop.clear()
+        button.configure(state="disabled")
+        url_entry.configure(state="disabled")
+        code_entry.configure(state="disabled")
+        status.set("Connecting...")
+        pairing_code = code.get()
+        code.set("")
+        worker = threading.Thread(target=work, args=(address, pairing_code), daemon=True)
+        worker.start()
+
+    button = ttk.Button(frame, text="Connect", command=connect)
+    button.pack(anchor="w", pady=(0, 12))
+    ttk.Label(frame, textvariable=status, wraplength=500).pack(anchor="w")
+    ttk.Label(frame, text="Preview only. This connector cannot print or change printer settings.",
+              wraplength=500).pack(anchor="w", pady=(16, 0))
+
+    def poll():
+        try:
+            while True:
+                kind, message = events.get_nowait()
+                if kind in ("status", "error"):
+                    status.set(message)
+                if kind == "done":
+                    button.configure(state="normal")
+                    url_entry.configure(state="normal")
+                    code_entry.configure(state="normal")
+        except queue.Empty:
+            pass
+        root.after(200, poll)
+
+    def close():
+        stop.set()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", close)
+    if self_test:
+        # Exercise the packaged Tk runtime without discovery, credentials or network.
+        root.update()
+        root.after(100, close)
+    else:
+        poll()
+    root.mainloop()
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--console", action="store_true", help="Use console setup")
+    parser.add_argument("--self-test", action="store_true", help="Check setup window without connecting")
+    args = parser.parse_args()
+    if args.console:
+        run()
+    else:
+        setup_window(self_test=args.self_test)
