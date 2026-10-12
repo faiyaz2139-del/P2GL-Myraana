@@ -419,9 +419,11 @@ function ConnectorPairing({ settings, reload }) {
   return <section className="settings-card" data-testid="connector-pairing-panel">
     <div className="section-heading"><h3>Connect Windows Connector</h3><Link2 /></div>
     <p>Discovery is read-only. It cannot print, change printer settings, or release jobs.</p>
-    <a className="button" href="/setup/myraana-connector.py" download data-testid="download-windows-connector-link">
-      <Download size={16} />Download Connector
+    <a className="button" href="https://github.com/faiyaz2139-del/P2GL-Myraana/releases/download/windows-connector-preview/MyraanaConnector.zip" data-testid="download-windows-connector-link">
+      <Download size={16} />Download Windows Connector
     </a>
+    <ol className="muted"><li>Download and extract the ZIP, then open MyraanaConnector.exe.</li><li>Click Pair connector here. Enter this website and the code in the connector window: <strong>{window.location.origin}</strong></li><li>Click Connect in the window, then Approve below.</li></ol>
+    <p className="muted">Windows 10/11 only · Preview version · No Python or PowerShell setup required.</p>
     <button className="primary" onClick={start} data-testid="start-connector-pairing-button">
       Pair connector
     </button>
