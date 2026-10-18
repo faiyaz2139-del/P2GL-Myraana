@@ -259,7 +259,7 @@ class IntegrationRun:
             pairing_data = pairing.json()
             inventory = {
                 "hostname": "ZZTEST-Windows-Connector",
-                "printers": [{"source": "windows_spooler", "name": "ZZTEST inventory only"}],
+                "printers": [{"source": "windows_spooler", "name": "ZZTEST RIP"}],
                 "fiery_rip": [],
                 "hot_folders": [],
             }
@@ -341,7 +341,14 @@ class IntegrationRun:
             self.record("exact-file proof approval", self.v1_approval, http=response.status_code, file_id=self.print_ready["id"], checksum=self.print_ready["sha"])
             asyncio.run(self.seed_capability())
             self.latest_job()
-            for action, data in (("route", {}), ("handoff", {"note": "ZZTEST staging only"})):
+            choices = self.request("GET", f"/jobs/{self.job_id}/route-options")
+            choices.raise_for_status()
+            options = choices.json()
+            selected = next(item for item in options["options"] if item["printer"] == "ZZTEST RIP")
+            route_data = {"routeId": selected["id"], "settingsVersion": options["settingsVersion"],
+                          "compatibilityConfirmed": True,
+                          "verificationNote": "Isolated simulated fixture; no physical capability claim."}
+            for action, data in (("route", route_data), ("handoff", {"note": "ZZTEST staging only"})):
                 response = self.request(
                     "POST",
                     f"/jobs/{self.job_id}/action",

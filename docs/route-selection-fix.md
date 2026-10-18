@@ -48,4 +48,8 @@ errors, timeouts and busy feedback. No live shop records, credentials, settings,
 pairings, AI calls or printer operations are used. Mocked persistence does not
 prove live MongoDB or Windows/Fiery acceptance.
 
+The separate database-backed `integration_agents_e2e.py` fixture is updated for
+the new route payload but was not executed here; it requires its isolated MongoDB
+environment and external PDF fixtures.
+
 No deployment is included. No Emergent agent run was started.
