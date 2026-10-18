@@ -29,6 +29,7 @@ from p2g.connector_pairing import (
 from p2g.costing import CostValidationError, cost_profile
 from p2g.core import AppError, db, new_id, now
 from p2g.pdfcheck import render_page
+from p2g.routing import route_options, select_route
 from p2g.workflow import (
     DEFAULT_RECIPE,
     create_file,
@@ -487,6 +488,15 @@ async def evaluate_job_agents(job_id: str, request: Request):
     return await evaluate_agents(job_id, user["name"])
 
 
+@api.get("/jobs/{job_id}/route-options")
+async def job_route_options(job_id: str, request: Request):
+    require_user(await current_user(request))
+    job = await get_job(job_id)
+    if not job:
+        raise AppError("Job not found.", 404)
+    return route_options(job, await shop_settings(), await paired_devices())
+
+
 @api.post("/jobs/{job_id}/action")
 async def job_action(job_id: str, request: Request):
     assert_origin(request)
@@ -529,11 +539,16 @@ async def job_action(job_id: str, request: Request):
         update_task(job, 8, "Waiting for operator", "Choose a compatible production route.", user["name"])
     elif action == "route":
         require_completed(job, 8)
+        if job["tasks"][8]["status"] == "Completed":
+            raise AppError("A route is already selected. Refresh the job to continue.")
         settings_data = await shop_settings()
-        if not settings_data["printer"] or job["stock"] not in settings_data["stocks"]:
-            raise AppError("No compatible route. Configure the printer and selected stock first.")
-        job["route"] = {"settingsVersion": settings_data["version"], "printer": settings_data["printer"]}
-        update_task(job, 8, "Completed", "Production route selected.", user["name"])
+        try:
+            selected = select_route(job, settings_data, await paired_devices(), payload, user["name"], now())
+        except ValueError as error:
+            raise AppError(str(error)) from error
+        selected["compatibility"]["actorId"] = user["id"]
+        job["route"] = selected
+        update_task(job, 8, "Completed", f"Route selected: {selected['printer']}. Compatibility confirmed by {user['name']}; staging readiness is still unverified.", user["name"])
         update_task(job, 9, "Waiting for operator", "Stage in RIP without printing.", user["name"])
     elif action == "handoff":
         require_completed(job, 9)
