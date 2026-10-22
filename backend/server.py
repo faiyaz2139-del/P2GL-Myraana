@@ -1562,13 +1562,25 @@ async def job_action(job_id: str, request: Request):
         update_task(job, 10, "Waiting for operator", "Check that the shop computer is connected. This does not print.", user["name"])
     elif action == "readiness":
         require_completed(job, 10)
-        agent = await readiness(job)
-        update_task(job, 10, "Completed", "Connector is fresh and staging destination is writable.", user["name"])
+        ready = await readiness(job)
+        host = ready.get("hostname") or "The shop computer"
+        if ready.get("delivery") == "folder":
+            note = "Connector is fresh and staging destination is writable."
+        else:
+            note = f"{host} is connected. The PRINT_READY file will be sent to Fiery HOLD. This does not print."
+        update_task(job, 10, "Completed", note, user["name"])
         update_task(job, 11, "Waiting for approval", "Authorize this exact file for staging.", user["name"])
-        job["readiness"] = {"checkedAt": now(), "destination": agent["destination"]}
+        job["readiness"] = {
+            "checkedAt": now(),
+            "destination": ready.get("destination") or "",
+            "deviceId": ready.get("id") or "",
+            "hostname": host,
+            "lastSeen": ready.get("lastSeen") or "",
+            "delivery": ready.get("delivery") or "",
+        }
     elif action == "authorize":
         require_completed(job, 11)
-        await readiness(job)
+        ready = await readiness(job)
         if not print_ready or payload.get("sha") != print_ready["sha"] or not payload.get("acknowledged"):
             raise AppError("Authorization must match the approved file and require confirmation.")
         if job.get("approval", {}).get("sha") != print_ready["sha"]:
@@ -1580,7 +1592,30 @@ async def job_action(job_id: str, request: Request):
             "actor": user["name"],
             "at": now(),
         }
-        update_task(job, 11, "Completed", "Production authorization recorded; printing remains manual.", user["name"])
+        host = ready.get("hostname") or "The shop computer"
+        if ready.get("delivery") == "fiery_hold":
+            settings_data = await shop_settings()
+            printer = fiery_target(settings_data) or {}
+            preset = "London BC" if is_london_card(job.get("recipe") or {}) else (
+                ((job.get("recipe") or {}).get("production") or {}).get("preset") or ""
+            )
+            job["fieryHold"] = {
+                "status": "queued",
+                "explicit": True,
+                "deviceId": ready.get("id") or "",
+                "preset": preset or "London BC",
+                "stock": job.get("stock") or "",
+                "finish": job.get("finish"),
+                "printer": printer.get("name") or "",
+                "address": printer.get("address") or "",
+                "at": now(),
+                "held": False,
+                "printed": False,
+            }
+            note = f"Sending the PRINT_READY file to Fiery HOLD on {host}. It will not print."
+        else:
+            note = "Production authorization recorded; printing remains manual."
+        update_task(job, 11, "Completed", note, user["name"])
         update_task(job, 12, "Waiting for operator", "Confirm only after physical sheets print.", user["name"])
     elif action in {"printed", "cut", "qc", "pack", "rework"}:
         if action != "rework" and (

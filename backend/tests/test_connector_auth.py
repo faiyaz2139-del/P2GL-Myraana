@@ -7,12 +7,16 @@ from pathlib import Path
 from p2g.connector_auth import (
     connector_presence,
     credential_hash,
+    hold_for_device,
+    last_seen_phrase,
     legacy_credential_hash,
     legacy_shared_secret_shop,
     list_open_pairings,
     manual_approval_required,
     newest_found_pairing,
     select_device,
+    select_ready_connector,
+    stale_connector_message,
 )
 from p2g.tenancy import PRINT2GO_SHOP_ID, TenantDatabase, TenantScopeError, shop_scope
 
@@ -246,3 +250,126 @@ async def _expired_found_pairing_is_not_the_approve_target():
     assert "It runs in the tray." in ui
     assert "Connected to ${host}" in ui
     assert "pairings[0]" not in ui
+
+
+def _p2gl(at, seconds_ago, capabilities=None, enabled=True):
+    seen = (at - timedelta(seconds=seconds_ago)).isoformat()
+    device = {
+        "_id": "device-p2gl-2",
+        "enabled": enabled,
+        "lastSeen": seen,
+        "inventory": {"hostname": "P2GL-2"},
+    }
+    if capabilities is not None:
+        device["inventory"]["capabilities"] = capabilities
+    return device
+
+
+def test_paired_device_is_ready_without_a_writable_folder():
+    """P2GL-2 heartbeats every few seconds. Step 11 must not demand a drop folder."""
+    at = datetime(2026, 10, 22, 22, 30, tzinfo=timezone.utc)
+    ready = select_ready_connector([_p2gl(at, 8, ["fiery_hold"])], agent=None, at=at)
+    assert ready["kind"] == "device"
+    assert ready["id"] == "device-p2gl-2"
+    assert ready["hostname"] == "P2GL-2"
+    assert ready["delivery"] == "fiery_hold"
+    assert ready["writable"] is False
+    assert ready["destination"] == ""
+    assert "fiery_hold" in ready["capabilities"]
+
+
+def test_live_connector_without_capabilities_still_stages_to_fiery_hold():
+    at = datetime(2026, 10, 22, 22, 30, tzinfo=timezone.utc)
+    ready = select_ready_connector([_p2gl(at, 8)], agent=None, at=at)
+    assert ready["kind"] == "device"
+    assert ready["hostname"] == "P2GL-2"
+    assert ready["delivery"] == "fiery_hold"
+    assert ready["writable"] is False
+    assert "fiery_hold" in ready["capabilities"]
+
+
+def test_stale_paired_device_is_named_and_not_ready():
+    at = datetime(2026, 10, 22, 22, 30, tzinfo=timezone.utc)
+    stale = _p2gl(at, 91, ["fiery_hold"])
+    assert select_ready_connector([stale], agent=None, at=at) is None
+    message = stale_connector_message([stale], at)
+    assert "P2GL-2 is not connected." in message
+    assert "Open MyraanaConnector on P2GL-2." in message
+    assert "Last seen 1 minute ago." in message
+    edge = _p2gl(at, 90, ["fiery_hold"])
+    assert select_ready_connector([edge], agent=None, at=at)["hostname"] == "P2GL-2"
+
+
+def test_writable_folder_applies_only_to_a_configured_file_drop_agent():
+    at = datetime(2026, 10, 22, 22, 30, tzinfo=timezone.utc)
+    fresh = (at - timedelta(seconds=8)).isoformat()
+    bare = {"writable": True, "lastSeen": fresh}
+    assert select_ready_connector([], bare, at) is None
+    folder = {"writable": True, "lastSeen": fresh, "destination": r"C:\hotfolder"}
+    ready = select_ready_connector([], folder, at)
+    assert ready["kind"] == "folder"
+    assert ready["delivery"] == "folder"
+    assert ready["writable"] is True
+    assert ready["destination"] == r"C:\hotfolder"
+    closed = {"writable": False, "lastSeen": fresh, "destination": r"C:\hotfolder"}
+    assert select_ready_connector([], closed, at) is None
+    old = {"writable": True, "lastSeen": (at - timedelta(seconds=91)).isoformat(), "destination": r"C:\hotfolder"}
+    assert select_ready_connector([], old, at) is None
+    device = _p2gl(at, 8, ["fiery_hold"])
+    chosen = select_ready_connector([device], closed, at)
+    assert chosen["kind"] == "device"
+    assert chosen["delivery"] == "fiery_hold"
+    assert chosen["writable"] is False
+
+
+def test_fiery_hold_device_is_preferred_and_a_drop_folder_device_stays_a_folder():
+    at = datetime(2026, 10, 22, 22, 30, tzinfo=timezone.utc)
+    newer = _p2gl(at, 2)
+    newer["_id"] = "device-other"
+    newer["inventory"]["hostname"] = "OTHER-PC"
+    newer["inventory"]["capabilities"] = ["pdf_hot_folder"]
+    fiery = _p2gl(at, 20, ["fiery_hold"])
+    ready = select_ready_connector([newer, fiery], at=at)
+    assert ready["id"] == "device-p2gl-2"
+    assert ready["delivery"] == "fiery_hold"
+    only_folder = select_ready_connector([newer], at=at)
+    assert only_folder["delivery"] == "folder"
+    assert only_folder["writable"] is False
+    disabled = _p2gl(at, 4, ["fiery_hold"], enabled=False)
+    assert select_ready_connector([disabled], at=at) is None
+
+
+def test_last_seen_phrase_and_hold_stay_with_the_paired_device():
+    at = datetime(2026, 10, 22, 22, 30, tzinfo=timezone.utc)
+    assert last_seen_phrase(at - timedelta(seconds=8), at) == "8 seconds ago"
+    assert last_seen_phrase(at - timedelta(seconds=1), at) == "1 second ago"
+    assert last_seen_phrase("", at) == ""
+    open_hold = {"fieryHold": {"status": "queued", "explicit": True, "deviceId": ""}}
+    pinned = {"fieryHold": {"status": "queued", "explicit": True, "deviceId": "device-p2gl-2"}}
+    assert hold_for_device(open_hold, "device-p2gl-2") is True
+    assert hold_for_device(open_hold, "device-other") is True
+    assert hold_for_device(pinned, "device-p2gl-2") is True
+    assert hold_for_device(pinned, "device-other") is False
+
+
+def test_readiness_and_staging_use_the_paired_device():
+    root = Path(__file__).resolve().parents[2]
+    workflow = (root / "backend" / "p2g" / "workflow.py").read_text(encoding="utf-8")
+    start = workflow.index("async def readiness")
+    body = workflow[start:]
+    assert "select_ready_connector(" in body
+    assert "connector_devices" in body
+    assert 'agent.get("writable")' not in body
+    assert "destination" in body
+    pairing = (root / "backend" / "p2g" / "connector_pairing.py").read_text(encoding="utf-8")
+    assert "normalise_capabilities" in pairing
+    assert "hold_for_device" in pairing
+    assert 'job["tasks"][10]["status"] == "Completed"' in pairing
+    server = (root / "backend" / "server.py").read_text(encoding="utf-8")
+    assert 'ready.get("delivery") == "fiery_hold"' in server
+    assert '"explicit": True' in server
+    assert 'deviceId": ready.get("id")' in server
+    ui = (root / "frontend" / "src" / "App.js").read_text(encoding="utf-8")
+    assert 'data-testid="readiness-connector-notice"' in ui
+    assert "Last seen " in ui
+    assert "readinessNotice(settings)" in ui

@@ -300,6 +300,8 @@ class ConnectorSetupTests(unittest.TestCase):
         self.assertEqual(connector.TRAY_MENU, ("Open", "Scan again", "Start with Windows", "Quit"))
         self.assertIn("handle_window_close", source)
         self.assertIn("should_reconnect", source)
+        self.assertIn('"capabilities": reported_capabilities()', source)
+        self.assertEqual(connector.reported_capabilities(), ["fiery_hold"])
 
     def test_closing_the_window_keeps_the_heartbeat(self):
         class Root:
