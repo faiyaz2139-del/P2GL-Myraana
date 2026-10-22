@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
 
+from p2g.london_card import london_business_card_recipe
 from p2g.products import default_artwork_rules
 
 
@@ -176,17 +177,7 @@ def starter_settings(shop_name):
 def starter_recipes():
     """Business card and flyer presets every new shop starts with."""
     return [
-        {
-            "id": "business-card",
-            "version": 1,
-            "name": "Business card",
-            "width": 3.5,
-            "height": 2.0,
-            "bleed": 0.125,
-            "safe": 0.25,
-            "minDpi": 300,
-            "cutInstructions": "Cut to 3.5 × 2 inches using the verified trim box.",
-        },
+        london_business_card_recipe(),
         {
             "id": "flyer",
             "product": "flyer",

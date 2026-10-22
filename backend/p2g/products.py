@@ -4,6 +4,7 @@ Shop artwork rules supply bleed, safe zone, DPI and colour policy.
 A catalog preset only prefills. Explicit job fields always win.
 """
 from p2g.catalog_seed import SpecError, load_presets
+from p2g.london_card import normalise_stock_name
 
 
 FOLD_LABELS = {
@@ -144,7 +145,7 @@ def resolve_spec(payload, rules=None, recipe_doc=None):
     if str(payload.get("orientation") or "").lower() == "horizontal":
         width, height = height, width
         width_in, height_in = height_in, width_in
-    stock = str(payload.get("stock") or _first(preset.get("stocks")) or "Shop stock").strip()
+    stock = normalise_stock_name(payload.get("stock") or _first(preset.get("stocks")) or "Shop stock")
     finish = str(payload.get("finish") or _first(preset.get("finishes")) or "Shop finish").strip()
     if not 1 <= len(stock) <= 120 or not 1 <= len(finish) <= 120:
         raise SpecError("Stock and finish must be between 1 and 120 characters.")

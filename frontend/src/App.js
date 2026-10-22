@@ -410,7 +410,8 @@ function JobView({ job, reload, back, settings, user, openSettings, onArchived }
       setBusy(false);
     }
   };
-  const artworkUpload = (label, labelId, inputId) => <div>
+    const artworkUpload = (label, labelId, inputId) => <div>
+    {job.recipe?.production?.preset === "London BC" && <p className="notice" data-testid="file-location-rule">Ask for the design file location. Don't search for or guess the file. Open that file and confirm it belongs to {job.customer}.</p>}
     <label className="check-label"><input type="checkbox" checked={uploadAck} onChange={(event) => setUploadAck(event.target.checked)} data-testid="artwork-acknowledge-checkbox" />This file is the artwork for this job.</label>
     <label className="upload-button primary" data-testid={labelId}><Upload size={17} />{label}<input type="file" accept={accept} disabled={busy || !uploadAck} data-testid={inputId} onChange={(event) => upload(event.target.files?.[0])} /></label>
   </div>;
@@ -429,6 +430,7 @@ function JobView({ job, reload, back, settings, user, openSettings, onArchived }
       <p className="notice" data-testid="proof-only-stop">This job is a proof only, so it does not go to a press. Switch to production here if it should be printed.</p>
       <button className="primary" onClick={() => act("route", { mode: "production" })} disabled={busy} data-testid="switch-production-route-button">Switch to production route</button>
     </div>;
+    if (current === 9 && job.productionChecklist) return <LondonChecklist job={job} action={act} busy={busy} />;
     if (current === 9) return <RIPAction action={act} busy={busy} />;
     if (current === 10) return <div>
       <p className="notice">The shop computer must be connected before this file can be staged. Start the connector, then check again. This step does not print.</p>
@@ -480,6 +482,7 @@ function JobView({ job, reload, back, settings, user, openSettings, onArchived }
       <div className="summary-strip"><div><span>Finished size</span><strong>{job.spec ? `${trimNumber(job.spec.width)} × ${trimNumber(job.spec.height)} ${job.spec.unit}` : `${job.recipe.width} × ${job.recipe.height} in`}</strong></div><div><span>Stock</span><strong>{job.stock}</strong></div><div><span>Finish</span><strong>{job.finish}</strong></div><div><span>Progress</span><strong>{job.tasks.filter((item) => item.status === "Completed").length} of 16 steps</strong></div></div>
       <div className="progress-line" data-testid="job-progress">{job.tasks.map((item) => <div key={item.id} className={item.status === "Completed" ? "done" : item.status === "Running" ? "running" : ""} />)}</div>
       <section className="next-action" data-testid="production-review-panel"><div className="next-label"><span className="eyebrow">PRODUCTION REVIEW</span><span>{settings?.aiConnected ? "AI-assisted" : "Rule-based review"}</span></div><h2>Run AI Production Review</h2><p>Reviews saved job evidence only. It cannot approve, complete workflow steps, or print.</p><button className="button" onClick={runAgentReview} disabled={busy} data-testid="run-production-review-button"><ShieldCheck size={17} />{busy ? "Reviewing…" : "Run AI Production Review"}</button>{agentReview && <div className="inspection-details" data-testid="production-review-results"><div className="section-heading"><div><h3 data-testid="production-review-headline">{(agentReview.headline || reviewHeadline(agentReview.results)).title}</h3><p data-testid="production-review-detail">{(agentReview.headline || reviewHeadline(agentReview.results)).detail}</p></div><span>{settings?.aiConnected ? "AI-assisted" : "Rule-based review"}</span></div>{(agentReview.results || []).map((item) => <div className="inspection-note" key={`${agentReview.execution}-${item.agent}`}><strong>{item.agent} · {item.status}</strong><p>{item.summary}</p>{item.stop_reasons?.length > 0 && <p>Next: {item.stop_reasons.join(" ")}</p>}{item.warnings?.length > 0 && <p>Next: {item.warnings.join(" ")}</p>}{item.data?.selected_plan?.cost_estimate && <p data-testid="cost-estimate-summary">Cost {item.data.selected_plan.cost_estimate.total} · Margin {item.data.selected_plan.cost_estimate.profit_margin_percent ?? "unavailable"}%</p>}{item.data?.money_cost === "UNKNOWN" && <p data-testid="cost-inputs-missing">Cost inputs are unavailable; no cheapest route is claimed.</p>}</div>)}</div>}</section>
+      {job.cardRoute && <p className={`notice${job.cardRoute.stop ? " warning" : ""}`} data-testid="card-route"><StepKind kind={job.cardRoute.kind} /> {job.cardRoute.message}</p>}
       <section className="next-action" data-testid="next-action-panel"><div className="next-label"><span className="eyebrow">YOUR NEXT STEP</span><span>Step {current + 1} of 16</span></div><h2>{task.title}</h2><p>{task.result}</p>{actionPanel()}</section>
       {proof && <section className="proof-section" data-testid="production-proof-section"><div className="section-heading"><h3>Production proof</h3><a className="text-button" href={`${API}/files/${job.id}/${proof.id}?download`} data-testid="download-print-ready-link"><Download size={15} />Download PDF</a></div><div className="proof-holder"><div className="proof-pages">{Array.from({ length: job.sides }).map((_, index) => <div className="proof-page" key={index}><p>{index ? "Back" : "Front"}</p><img src={`${API}/files/${job.id}/${proof.id}/preview/${index + 1}`} alt={`Proof page ${index + 1}`} data-testid={`proof-page-${index + 1}`} /></div>)}</div></div><div className="file-identity"><ShieldCheck size={15} /><span>Actual generated production file<small data-testid="print-ready-sha">SHA-256 {proof.sha}</small></span></div></section>}
       {job.inspection && <details className="inspection-details" open data-testid="inspection-details"><summary><AlertTriangle size={16} />Artwork inspection · {job.inspection.errors.length} blocking issue(s)</summary><div>{job.inspection.errors.map((item) => <p className="notice warning" key={item}>{item}</p>)}{job.inspection.actions?.map((item) => <p className="inspection-note" key={item}>Corrective action: {item}</p>)}{job.inspection.warnings.map((item) => <p className="inspection-note" key={item}>{item}</p>)}</div></details>}
@@ -542,6 +545,48 @@ function RouteAction({ job, settings, user, act, busy, errorCode }) {
   </div>;
 }
 
+function StepKind({ kind }) {
+  const labels = {
+    ask: "Ask the operator",
+    photoshop: "Photoshop/auto-fix",
+    fiery: "Fiery",
+    decision: "Decision",
+    stop: "Stop for review",
+    start: "Start / finish",
+  };
+  return <span className={`kind-badge kind-${kind || "decision"}`}>{labels[kind] || kind}</span>;
+}
+
+function KindLegend() {
+  const kinds = ["ask", "photoshop", "fiery", "decision", "stop", "start"];
+  return <div className="kind-legend" data-testid="step-kind-legend">{kinds.map((kind) => <span key={kind} data-testid={`london-kind-${kind}`}><StepKind kind={kind} /></span>)}</div>;
+}
+
+function LondonChecklist({ job, action, busy }) {
+  const steps = job.productionChecklist || [];
+  const current = steps.find((step) => step.status !== "done");
+  const cutter = job.recipe?.production?.cutter;
+  const advance = (extra = {}) => action("production-step", {
+    step: current.id,
+    ok: true,
+    preset: job.recipe?.production?.preset || "London BC",
+    held: true,
+    file: job.cardRoute?.outputName,
+    sheet: { stretched: false, cropped: false, missingCards: false },
+    ...extra,
+  });
+  return <div data-testid="london-checklist">
+    <KindLegend />
+    {job.productionStop && <p className="notice warning" data-testid="london-stop">{job.productionStop}</p>}
+    <ol className="london-steps">{steps.map((step) => <li key={step.id} data-testid={`london-step-${step.id}`} className={step.status}><StepKind kind={step.kind} /><strong>{step.title}</strong><p>{step.detail}</p></li>)}</ol>
+    {cutter && <p data-testid="duplo-job">Duplo {cutter.model} job no. {cutter.jobNumber}, {cutter.jobName}. Slitter slots {(cutter.slitterSlots || []).join(" and ")}.</p>}
+    {current?.id === "stock" ? <div className="action-row">
+      <button type="button" className="primary" disabled={busy} data-testid="london-stock-matte" onClick={() => advance({ finish: "Matte" })}>Select Matte cardstock</button>
+      <button type="button" className="button" disabled={busy} data-testid="london-stock-glossy" onClick={() => advance({ finish: "Glossy" })}>Select Glossy cardstock</button>
+    </div> : current && <button type="button" className="primary" disabled={busy} data-testid="london-step-advance" onClick={() => advance()}>{current.title}</button>}
+  </div>;
+}
+
 function RIPAction({ action, busy }) {
   const [note, setNote] = useState("");
   return <div><label>RIP job name and imposition settings<input value={note} onChange={(event) => setNote(event.target.value)} minLength="5" data-testid="rip-note-input" /></label><button className="primary" disabled={busy || note.length < 5} onClick={() => action("handoff", { note })} data-testid="confirm-rip-staging-button">Confirm RIP staging</button></div>;
@@ -574,8 +619,19 @@ function Recipes({ recipes, catalog, reload, user }) {
   const save = async (event) => {
     event.preventDefault();
     const form = Object.fromEntries(new FormData(event.currentTarget));
+    const body = { ...form, product: productId };
+    if (recipe?.production) {
+      body.production = {
+        preset: form.presetName || recipe.production.preset,
+        cutter: {
+          jobNumber: Number(form.cutterJobNumber || recipe.production.cutter?.jobNumber || 2),
+          jobName: recipe.production.cutter?.jobName,
+          slitterSlots: recipe.production.cutter?.slitterSlots,
+        },
+      };
+    }
     try {
-      await api("recipes", { method: "POST", body: JSON.stringify({ ...form, product: productId }) });
+      await api("recipes", { method: "POST", body: JSON.stringify(body) });
       setMessage("New recipe version saved. Existing jobs remain pinned.");
       reload();
     } catch (reason) { setMessage(reason.message); }
@@ -590,11 +646,24 @@ function Recipes({ recipes, catalog, reload, user }) {
           </select>
         </label>
         {message && <p className="notice" data-testid="recipe-message">{message}</p>}
-        <form key={productId} onSubmit={save} data-testid="recipe-form">
+        <form key={`${productId}-${recipe?.version || 0}`} onSubmit={save} data-testid="recipe-form">
           <fieldset disabled={user.role !== "admin"}>
             <label>Recipe name<input name="name" defaultValue={recipe?.name || preset?.name || ""} data-testid="recipe-name-input" /></label>
             <div className="form-grid">{["width", "height", "bleed", "safe", "minDpi"].map((key) => <label key={key}>{key}<input name={key} type="number" step="0.001" defaultValue={recipe?.[key] ?? (key === "minDpi" ? 300 : "")} data-testid={`recipe-${key}-input`} /></label>)}</div>
             <label>Cutting instructions<textarea name="cutInstructions" defaultValue={recipe?.cutInstructions || ""} data-testid="recipe-instructions-input" /></label>
+            {recipe?.production && <div data-testid="london-recipe">
+              <h3>{recipe.workflow || "Business card workflow: file to Fiery"}</h3>
+              <KindLegend />
+              <p data-testid="london-orientations">Portrait cards: 2 × 3.5 in trim, 2.25 × 3.75 in with bleed. Same steps. Both orientations are accepted.</p>
+              <p data-testid="london-safe-area">Safe area is 1/8 in inside the trim. The original file stays untouched. Fiery imports the PRINT_READY file, never the original.</p>
+              <p data-testid="london-sheet">{recipe.production.preset} · {recipe.production.imposition?.sheetWidthIn} × {recipe.production.imposition?.sheetHeightIn} in · {recipe.production.imposition?.columns} × {recipe.production.imposition?.rows} = {recipe.production.imposition?.up} up</p>
+              <p data-testid="london-cutter">{recipe.production.cutter?.model} job no. {recipe.production.cutter?.jobNumber}. Slitter slots {(recipe.production.cutter?.slitterSlots || []).join(" and ")}.</p>
+              <div className="form-grid">
+                <label>Fiery preset<input name="presetName" defaultValue={recipe.production.preset || "London BC"} data-testid="fiery-preset-name" /></label>
+                <label>Cutter job number<input name="cutterJobNumber" type="number" min="1" max="999" defaultValue={recipe.production.cutter?.jobNumber ?? 2} data-testid="cutter-job-number" /></label>
+              </div>
+              <ol className="london-steps">{(recipe.production.steps || []).map((step) => <li key={step.id}><StepKind kind={step.kind} />{step.title}</li>)}</ol>
+            </div>}
             <button className="primary" data-testid="save-recipe-button">Save a new version</button>
           </fieldset>
         </form>

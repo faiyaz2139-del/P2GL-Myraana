@@ -32,6 +32,18 @@ from p2g.costing import CostValidationError, cost_profile
 from p2g.core import AppError, db, new_id, now
 from p2g.present import status_label
 from p2g.printers import filter_printers, is_virtual_printer, printer_status
+from p2g.london_card import (
+    WORKFLOW_NAME,
+    apply_production_event,
+    chart_file_rules,
+    connector_production_hook,
+    fresh_checklist,
+    is_london_card,
+    london_business_card_recipe,
+    merge_production,
+    normalise_stock_list,
+    pin_job_recipe,
+)
 from p2g.products import (
     artwork_rules_from_settings,
     normalize_artwork_rules,
@@ -589,6 +601,18 @@ async def create_recipe(request: Request):
         "cutInstructions": valid_text(payload.get("cutInstructions"), "Instructions", 2000),
         "created": now(),
     }
+    if product_id == "business-card" or (latest_recipe and latest_recipe.get("production")):
+        base = latest_recipe if latest_recipe and latest_recipe.get("production") else None
+        if product_id == "business-card" and base is None:
+            base = london_business_card_recipe()
+        if base:
+            try:
+                edits = payload.get("production") if isinstance(payload.get("production"), dict) else {}
+                recipe["production"] = merge_production(base, edits)
+            except (TypeError, ValueError) as error:
+                raise AppError("Cutter settings are invalid.", 400) from error
+            recipe["workflow"] = base.get("workflow") or WORKFLOW_NAME
+            recipe["fileRules"] = chart_file_rules() if product_id == "business-card" else base.get("fileRules")
     await db.recipes.insert_one(recipe.copy())
     return public(recipe)
 
@@ -648,7 +672,7 @@ async def update_settings(request: Request):
     require_admin(await current_user(request))
     payload = await request.json()
     current = await shop_settings()
-    stocks = [valid_text(item, "Stock", 140) for item in payload.get("stocks", [])]
+    stocks = normalise_stock_list([valid_text(item, "Stock", 140) for item in payload.get("stocks", [])])
     if len(stocks) > 80:
         raise AppError("Use at most 80 supported stocks.", 400)
     printer = str(payload.get("printer") or "").strip()[:120]
@@ -989,6 +1013,10 @@ async def create_job(request: Request):
         spec, recipe = resolve_spec({**payload, "product": preset_id}, rules, recipe_doc)
     except SpecError as error:
         raise AppError(error.message, 400) from error
+    recipe = pin_job_recipe(recipe, recipe_doc)
+    if is_london_card(recipe):
+        spec["safe"] = recipe["safe"]
+        spec["bleed"] = recipe["bleed"]
     job = {
         "id": new_id(),
         "customer": valid_text(payload.get("customer"), "Customer", 180),
@@ -1222,6 +1250,15 @@ async def job_action(job_id: str, request: Request):
         }
         update_task(job, 7, "Completed", "Proof approved for this exact PDF.", user["name"], print_ready["id"])
         update_task(job, 8, "Waiting for operator", "Choose a press for this job, or keep it as a proof.", user["name"])
+        if is_london_card(job.get("recipe") or {}):
+            output = (job.get("cardRoute") or {}).get("outputName") or print_ready.get("name")
+            checklist = fresh_checklist(job["recipe"], output)
+            for step in checklist:
+                if step["id"] in {"start", "ask-file", "confirm-customer", "size", "canvas", "background", "safe", "export"}:
+                    step["status"] = "done"
+            job["productionChecklist"] = checklist
+            job.pop("productionStop", None)
+            job["connectorHook"] = connector_production_hook(job)
     elif action == "route":
         require_completed(job, 8)
         settings_data = await shop_settings()
@@ -1273,7 +1310,49 @@ async def job_action(job_id: str, request: Request):
                 "printer": printer,
             }
             update_task(job, 8, "Completed", f"Production route selected: {printer}.", user["name"])
-            update_task(job, 9, "Waiting for operator", "Record the RIP job name. This does not print.", user["name"])
+            if is_london_card(job.get("recipe") or {}):
+                update_task(
+                    job,
+                    9,
+                    "Waiting for operator",
+                    "Import the PRINT_READY file in Fiery and put it on HOLD. This does not print.",
+                    user["name"],
+                )
+            else:
+                update_task(job, 9, "Waiting for operator", "Record the RIP job name. This does not print.", user["name"])
+    elif action == "production-step":
+        require_completed(job, 9)
+        if job["tasks"][9]["status"] == "Completed":
+            raise AppError("The Fiery checklist is already complete.")
+        if not is_london_card(job.get("recipe") or {}):
+            raise AppError("This job does not use the London business-card checklist.")
+        if not job.get("productionChecklist"):
+            output = (job.get("cardRoute") or {}).get("outputName") or (print_ready or {}).get("name")
+            job["productionChecklist"] = fresh_checklist(job["recipe"], output)
+        settings_data = await shop_settings()
+        outcome = apply_production_event(
+            job["productionChecklist"],
+            payload,
+            job["recipe"],
+            settings_data.get("stocks") or [],
+        )
+        if outcome["stop"]:
+            job["productionStop"] = outcome["stop"]
+            update_task(job, 9, "Needs attention", outcome["stop"], user["name"])
+        else:
+            job.pop("productionStop", None)
+            if outcome["done"]:
+                update_task(job, 9, "Completed", "Fiery checklist recorded. No print command sent.", user["name"])
+                update_task(
+                    job,
+                    10,
+                    "Waiting for operator",
+                    "Check that the shop computer is connected. This does not print.",
+                    user["name"],
+                )
+            else:
+                pending = next(step for step in job["productionChecklist"] if step["status"] != "done")
+                update_task(job, 9, "Waiting for operator", pending["title"], user["name"])
     elif action == "handoff":
         require_completed(job, 9)
         note = valid_text(payload.get("note"), "RIP handoff note", 1000, 5)
@@ -1480,7 +1559,11 @@ async def connector_heartbeat(request: Request):
             file = latest(job, "PRINT_READY")
             authorization = job.get("authorization")
             if file and authorization and authorization["sha"] == file["sha"]:
-                authorized.append({"id": job["id"], "generation": job["generation"], "file": file})
+                entry = {"id": job["id"], "generation": job["generation"], "file": file}
+                hook = connector_production_hook(job)
+                if hook:
+                    entry["production"] = hook
+                authorized.append(entry)
         return {"jobs": authorized}
 
 

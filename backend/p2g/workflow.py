@@ -23,6 +23,7 @@ from p2g.tenancy import (
     unscoped,
 )
 from p2g.uploads import SpecError, prepare_artwork
+from p2g.london_card import assess_london_card, is_london_card, print_ready_name, seed_london_card_shops
 
 
 TASK_TITLES = [
@@ -142,6 +143,15 @@ def reset_from(job, index, reason):
         )
     if index <= 7:
         job.pop("approval", None)
+        job.pop("productionChecklist", None)
+        job.pop("productionStop", None)
+        job.pop("connectorHook", None)
+    if index <= 2:
+        ordered = (job.get("cardRoute") or {}).get("ordered")
+        if ordered:
+            job["recipe"]["width"] = ordered["width"]
+            job["recipe"]["height"] = ordered["height"]
+        job.pop("cardRoute", None)
     job.pop("authorization", None)
     if index <= 8:
         job.pop("route", None)
@@ -197,6 +207,7 @@ async def ensure_collections():
                 exists = await db.recipes.find_one({"id": recipe["id"]})
             if not exists:
                 await db.recipes.insert_one({**recipe, "created": now()})
+    await seed_london_card_shops(db)
 
 
 def password_hash(password):
@@ -355,6 +366,42 @@ async def run_pdf_workflow(job, actor, execution=None, token=None):
             update_task(job, 2, "Blocked", str(error), actor, original["id"])
             await persist()
             return job
+        london_name = None
+        if is_london_card(job.get("recipe") or {}) and job["tasks"][6]["status"] != "Completed":
+            previous = job.get("cardRoute") or {}
+            ordered = previous.get("ordered") or {
+                "width": job["recipe"]["width"],
+                "height": job["recipe"]["height"],
+            }
+            assessed = assess_london_card(
+                content,
+                job["recipe"],
+                original.get("name") or "",
+                job.get("customer") or "",
+                file_location=original.get("name") or "",
+            )
+            job["cardRoute"] = {**assessed["public"], "ordered": ordered}
+            if not assessed["proceed"]:
+                update_task(job, 2, "Needs attention", assessed["stop"], actor, original["id"], execution=execution)
+                await persist()
+                return job
+            if assessed["pdf"] is not None:
+                content = assessed["pdf"]
+            if assessed.get("trim"):
+                job["recipe"]["width"] = assessed["trim"]["width"]
+                job["recipe"]["height"] = assessed["trim"]["height"]
+            london_name = assessed["outputName"]
+            if not job.get("bleedConfirmation"):
+                decision = "blank-border" if assessed["public"]["route"] == "extend" else "bleed-present"
+                job["bleedDecision"] = decision
+                job["bleedConfirmation"] = {
+                    "actor_name": actor,
+                    "at": now(),
+                    "generation": job["generation"],
+                    "original_file_id": original["id"],
+                    "decision": decision,
+                    "note": "London BC accepted this file. The original was kept.",
+                }
         if job["tasks"][2]["status"] != "Completed":
             update_task(job, 2, "Running", "Checking artwork against the pinned recipe.", actor, execution=execution)
             await persist()
@@ -424,8 +471,12 @@ async def run_pdf_workflow(job, actor, execution=None, token=None):
                 produced,
                 working,
                 "Production PDF from prepared copy; no colour or font substitution.",
+                name=london_name or (print_ready_name(original.get("name")) if is_london_card(job.get("recipe") or {}) else None),
             )
-            update_task(job, 5, "Completed", "PRINT_READY PDF stored with a checksum.", actor, print_ready["id"])
+            ready_note = "PRINT_READY PDF stored with a checksum."
+            if london_name:
+                ready_note = f"PRINT_READY PDF stored as {london_name}. The original file was kept."
+            update_task(job, 5, "Completed", ready_note, actor, print_ready["id"])
         if job["tasks"][6]["status"] != "Completed":
             update_task(job, 6, "Running", "Reopening and verifying the production PDF.", actor, execution=execution)
             await persist()
