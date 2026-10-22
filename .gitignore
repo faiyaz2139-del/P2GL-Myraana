@@ -30,6 +30,9 @@ next-env.d.ts
 dist/
 dist
 
+# Generated at build time. A committed copy goes stale and /api/build-info would lie.
+backend/build_metadata.json
+
 # Environment files (comprehensive coverage)
 
 *token.json*

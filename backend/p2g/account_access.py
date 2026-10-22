@@ -72,6 +72,32 @@ def directory_keys():
     return _DIRECTORY_KEYS
 
 
+def removal_denial(actor_id, target, active_admin_count):
+    """Why this removal must be refused, or None when it may proceed.
+
+    An administrator cannot remove their own account. Removing the only
+    remaining administrator is also refused, so the shop always has one.
+    """
+    if not target or target.get("active") is False:
+        return "That person is not in this shop."
+    if str(target.get("id") or "") == str(actor_id or ""):
+        return "You can't remove your own account."
+    if target.get("role") == "admin" and int(active_admin_count or 0) <= 1:
+        return "The shop needs at least one administrator."
+    return None
+
+
+def account_is_active(user):
+    return bool(user) and user.get("active") is not False
+
+
+def exclude_archived(query=None):
+    """Default job reads omit archived jobs. A direct id lookup does not use this."""
+    combined = dict(query or {})
+    combined["archived"] = {"$ne": True}
+    return combined
+
+
 def public_lead(lead):
     return {
         "id": lead.get("id") or (None if lead.get("_id") is None else str(lead.get("_id"))),

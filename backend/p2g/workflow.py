@@ -6,10 +6,11 @@ import bcrypt
 from fastapi import HTTPException, Request
 from motor.motor_asyncio import AsyncIOMotorGridFSBucket
 
-from p2g.core import AppError, db, lock, new_id, now, unlock, sha256
+from p2g.core import AppError, db, lock, new_id, now, unlock
 from p2g.pdfcheck import PdfError, inspect, make_print_ready, prepare, render_page, verify
 from p2g.present import status_label
 from p2g.account_access import SUSPENDED_MESSAGE, shop_allows_sign_in
+from p2g.membership import save_session, user_for_session
 from p2g.tenancy import (
     PRINT2GO_SHOP_ID,
     current_shop_id,
@@ -20,7 +21,6 @@ from p2g.tenancy import (
     shop_scope,
     starter_recipes,
     unscoped,
-    activate_shop,
 )
 from p2g.uploads import SpecError, prepare_artwork
 
@@ -208,25 +208,7 @@ def password_matches(password, encoded):
 
 
 async def current_user(request: Request):
-    raw = request.cookies.get("p2g_session")
-    if not raw:
-        return None
-    with unscoped():
-        session = await db.sessions.find_one(
-            {"token_hash": sha256(raw), "expires": {"$gt": now()}},
-            {"_id": 0},
-        )
-        if not session:
-            return None
-        user = await db.users.find_one({"id": session["user_id"]}, {"_id": 0, "password": 0})
-    if user and user.get("shop_id"):
-        shop = await db.shops.find_one({"_id": user["shop_id"]}, {"_id": 1, "status": 1})
-        if shop and shop_allows_sign_in(shop.get("status")):
-            user["shop_status"] = shop.get("status") or "active"
-        else:
-            user["shop_status"] = "suspended"
-        activate_shop(user["shop_id"])
-    return user
+    return await user_for_session(db, request.cookies.get("p2g_session"), now())
 
 
 def require_user(user):
@@ -269,14 +251,23 @@ def session_response(request, user):
 
 async def create_session(token, user_id, shop_id=None):
     expiry = (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat()
-    record = {"id": new_id(), "user_id": user_id, "token_hash": sha256(token), "expires": expiry}
-    if shop_id:
-        with shop_scope(shop_id):
-            await db.sessions.insert_one(record)
-        return
-    with unscoped():
-        record["shop_id"] = None
-        await db.sessions.insert_one(record)
+    await save_session(
+        db,
+        token=token,
+        user_id=user_id,
+        shop_id=shop_id,
+        session_id=new_id(),
+        expires=expiry,
+    )
+
+
+async def issue_session(request, user):
+    """Set the same cookie login uses. Invite acceptance goes through here too."""
+    if not user or user.get("active") is False:
+        raise AppError("This account has been removed from the shop.", 403)
+    token, cookie, safe_user = session_response(request, user)
+    await create_session(token, user["id"], user.get("shop_id"))
+    return cookie, safe_user
 
 
 async def create_file(job, stage, content, parent, method, name=None):
@@ -495,6 +486,8 @@ async def process_with_lease(job_id, generation, actor):
             raise AppError("Job not found.", 404)
         if job["generation"] != generation:
             raise AppError("Artwork version changed. Refresh before continuing.")
+        if job.get("archived"):
+            raise AppError("This job is archived.", 409)
         if job.get("state") != "active":
             raise AppError(f"This job is {job.get('state')}. Resume it before processing.")
         if job["tasks"][6]["status"] == "Completed":

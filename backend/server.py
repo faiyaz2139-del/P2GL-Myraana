@@ -42,13 +42,16 @@ from p2g.products import (
 from p2g.public_forms import FormError, lead_from_payload, signup_result
 from p2g.account_access import (
     SUSPENDED_MESSAGE,
+    exclude_archived,
     public_lead,
+    removal_denial,
     reset_is_limited,
     reset_request_message,
     shop_allows_sign_in,
     shop_directory_row,
 )
 from p2g.mail import MailError, public_base, send_email
+from p2g.membership import end_user_sessions
 from p2g.shops import (
     accept_invite,
     confirm_password_reset,
@@ -79,7 +82,6 @@ from p2g.pdfcheck import render_page
 from p2g.workflow import (
     DEFAULT_RECIPE,
     create_file,
-    create_session,
     current_user,
     ensure_collections,
     file_bytes,
@@ -87,6 +89,7 @@ from p2g.workflow import (
     latest,
     password_hash,
     password_matches,
+    issue_session,
     public,
     readiness,
     record_event,
@@ -97,7 +100,6 @@ from p2g.workflow import (
     reset_from,
     process_with_lease,
     save_job,
-    session_response,
     tasks,
     update_task,
 )
@@ -255,8 +257,7 @@ async def auth_setup(request: Request):
     except Exception as error:
         await db.bootstrap.update_one({"_id": "first-run"}, {"$set": {"configured": False}})
         raise AppError("Administrator setup could not be saved. Retry safely.") from error
-    token, cookie, safe_user = session_response(request, user)
-    await create_session(token, user["id"], user["shop_id"])
+    cookie, safe_user = await issue_session(request, user)
     response = JSONResponse({"user": safe_user})
     response.set_cookie(**cookie)
     return response
@@ -288,8 +289,7 @@ async def auth_login(request: Request):
         shop = await db.shops.find_one({"_id": user["shop_id"]}, {"status": 1})
         if not shop or not shop_allows_sign_in(shop.get("status")):
             raise AppError(SUSPENDED_MESSAGE, 403)
-    token, cookie, safe_user = session_response(request, user)
-    await create_session(token, user["id"], user.get("shop_id"))
+    cookie, safe_user = await issue_session(request, user)
     response = JSONResponse({"user": safe_user})
     response.set_cookie(**cookie)
     return response
@@ -349,8 +349,7 @@ async def public_signup(request: Request):
         raise AppError("Too many requests for this email. Try again tomorrow.", 429)
     user, shop = await provision_shop(lead["shop"], lead["email"], password, lead["name"])
     await db.leads.insert_one({**lead, "id": new_id(), "created": now()})
-    token, cookie, safe_user = session_response(request, user)
-    await create_session(token, user["id"], user["shop_id"])
+    cookie, safe_user = await issue_session(request, user)
     response = JSONResponse({
         "ok": True,
         "workspace": True,
@@ -403,8 +402,7 @@ async def platform_setup(request: Request):
             "created": now(),
         }
         await db.users.insert_one(user)
-    token, cookie, safe_user = session_response(request, user)
-    await create_session(token, user["id"], None)
+    cookie, safe_user = await issue_session(request, user)
     response = JSONResponse({"user": safe_user})
     response.set_cookie(**cookie)
     return response
@@ -430,7 +428,7 @@ async def _platform_directory():
         listed = []
         for row in rows:
             shop_id = row.get("_id")
-            users = await db.users.count_documents({"shop_id": shop_id})
+            users = await db.users.count_documents({"shop_id": shop_id, "active": {"$ne": False}})
             jobs = await db.jobs.count_documents({"shop_id": shop_id})
             latest = await db.jobs.find(
                 {"shop_id": shop_id},
@@ -675,7 +673,7 @@ async def update_settings(request: Request):
     await replace_settings(data)
     if changed:
         affected = await db.jobs.find(
-            {"state": "active", "tasks.12.status": {"$ne": "Completed"}},
+            exclude_archived({"state": "active", "tasks.12.status": {"$ne": "Completed"}}),
             {"_id": 0},
         ).to_list(500)
         for job in affected:
@@ -763,7 +761,7 @@ async def verify_printer(request: Request):
     )
     if changed:
         affected = await db.jobs.find(
-            {"state": "active", "tasks.12.status": {"$ne": "Completed"}},
+            exclude_archived({"state": "active", "tasks.12.status": {"$ne": "Completed"}}),
             {"_id": 0},
         ).to_list(500)
         for job in affected:
@@ -800,7 +798,23 @@ async def save_cost_profile(request: Request):
 @api.get("/users")
 async def users(request: Request):
     require_admin(await current_user(request))
-    return await db.users.find({}, {"_id": 0, "password": 0}).to_list(100)
+    return await db.users.find({"active": {"$ne": False}}, {"_id": 0, "password": 0}).to_list(100)
+
+
+@api.post("/users/{user_id}/remove")
+async def remove_user(user_id: str, request: Request):
+    """Deactivate a shop user and end their sessions. The caller and the last admin stay."""
+    assert_origin(request)
+    actor = require_admin(await current_user(request))
+    target = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    admins = await db.users.count_documents({"role": "admin", "active": {"$ne": False}})
+    denial = removal_denial(actor["id"], target, admins)
+    if denial:
+        status = 404 if not target or target.get("active") is False else 400
+        raise AppError(denial, status)
+    await db.users.update_one({"id": user_id}, {"$set": {"active": False, "removed": now()}})
+    await end_user_sessions(db, user_id)
+    return {"ok": True}
 
 
 @api.post("/users")
@@ -937,8 +951,7 @@ async def confirm_password_reset_request(request: Request):
 async def accept_operator_invite(request: Request):
     assert_origin(request)
     user = await accept_invite(await request.json())
-    token, cookie, safe_user = session_response(request, user)
-    await create_session(token, user["id"], user.get("shop_id"))
+    cookie, safe_user = await issue_session(request, user)
     response = JSONResponse({"ok": True, "user": safe_user})
     response.set_cookie(**cookie)
     return response
@@ -947,7 +960,7 @@ async def accept_operator_invite(request: Request):
 @api.get("/jobs")
 async def jobs(request: Request):
     require_user(await current_user(request))
-    found = await db.jobs.find({}, {"_id": 0}).sort("created", -1).to_list(500)
+    found = await db.jobs.find(exclude_archived(), {"_id": 0}).sort("created", -1).to_list(500)
     for item in found:
         item["messages"] = []
         item["events"] = []
@@ -1094,6 +1107,8 @@ async def control_job(job_id: str, request: Request):
     job = await get_job(job_id)
     if not job:
         raise AppError("Job not found.", 404)
+    if job.get("archived"):
+        raise AppError("This job is archived.", 409)
     if job["state"] == "complete" or job["state"] == "cancelled":
         raise AppError("This job is closed.")
     job["state"] = state
@@ -1105,6 +1120,22 @@ async def control_job(job_id: str, request: Request):
     record_event(job, f"Job {('resumed' if state == 'active' else state)}.", user["name"])
     await save_job(job)
     return job
+
+
+@api.post("/jobs/{job_id}/archive")
+async def archive_job(job_id: str, request: Request):
+    """Hide a job from the default list. The record and its files stay in the shop."""
+    assert_origin(request)
+    user = require_admin(await current_user(request))
+    job = await get_job(job_id)
+    if not job:
+        raise AppError("Job not found.", 404)
+    if not job.get("archived"):
+        job["archived"] = True
+        job["archivedAt"] = now()
+        record_event(job, "Job archived.", user["name"])
+        await save_job(job)
+    return public(job)
 
 
 @api.post("/jobs/{job_id}/agents/evaluate")
@@ -1124,6 +1155,8 @@ async def job_action(job_id: str, request: Request):
     if not job:
         raise AppError("Job not found.", 404)
     payload = await request.json()
+    if job.get("archived"):
+        raise AppError("This job is archived.", 409)
     if job["state"] != "active":
         raise AppError(f"This job is {job['state']}. Resume it before making changes.")
     if payload.get("generation") != job["generation"]:
@@ -1441,7 +1474,7 @@ async def connector_heartbeat(request: Request):
                     "Physical printing still needs human confirmation.",
                 )
                 await save_job(job)
-        candidates = await db.jobs.find({"state": "active"}, {"_id": 0}).to_list(100)
+        candidates = await db.jobs.find(exclude_archived({"state": "active"}), {"_id": 0}).to_list(100)
         authorized = []
         for job in candidates:
             file = latest(job, "PRINT_READY")
