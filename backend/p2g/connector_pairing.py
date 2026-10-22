@@ -1,23 +1,12 @@
-import hashlib
 import hmac
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
 
+from p2g.connector_auth import credential_hash, legacy_credential_hash
 from p2g.core import AppError, db, new_id, now
 from p2g.printers import filter_printers
 from p2g.tenancy import PRINT2GO_SHOP_ID, bound_shop, shop_scope, unscoped
-
-
-def _secret():
-    secret = os.environ.get("CONNECTOR_SECRET")
-    if not secret:
-        raise AppError("Preview connector pairing is not configured.", 503)
-    return secret
-
-
-def _digest(value):
-    return hmac.new(_secret().encode(), value.encode(), hashlib.sha256).hexdigest()
 
 
 def _valid_id(value):
@@ -46,7 +35,7 @@ async def create_pairing(user):
     pairing = {
         "_id": new_id(),
         "status": "Searching",
-        "code_hash": _digest(code),
+        "code_hash": credential_hash(code),
         "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
         "created_by": user["id"],
         "created_at": now(),
@@ -63,13 +52,13 @@ async def claim_pairing(payload):
         raise AppError("Pairing request is invalid.", 400)
     with unscoped():
         pairing = await db.connector_pairings.find_one(
-            {"code_hash": _digest(code), "status": "Searching"}
+            {"code_hash": credential_hash(code), "status": "Searching"}
         )
         if not pairing or pairing["expires_at"] <= now():
             raise AppError("Pairing code is invalid or expired.", 409)
         result = await db.connector_pairings.update_one(
             {"_id": pairing["_id"], "status": "Searching"},
-            {"$set": {"status": "Found", "device_id": device_id, "claim_hash": _digest(claim),
+            {"$set": {"status": "Found", "device_id": device_id, "claim_hash": credential_hash(claim),
                       "inventory": _inventory(payload.get("inventory")), "claimed_at": now()}},
         )
     if not result.modified_count:
@@ -82,7 +71,9 @@ async def pairing_status(pairing_id, claim):
         pairing = await db.connector_pairings.find_one({"_id": pairing_id})
     if not pairing or pairing["expires_at"] <= now():
         raise AppError("Pairing is invalid or expired.", 409)
-    if not hmac.compare_digest(pairing.get("claim_hash", ""), _digest(claim)):
+    expected = pairing.get("claim_hash") or ""
+    actual = credential_hash(claim)
+    if len(expected) != len(actual) or not hmac.compare_digest(expected, actual):
         raise AppError("Connector claim is invalid.", 401)
     if pairing["status"] != "Connected":
         return {"status": pairing["status"]}
@@ -90,7 +81,7 @@ async def pairing_status(pairing_id, claim):
     with shop_scope(pairing.get("shop_id") or PRINT2GO_SHOP_ID):
         await db.connector_devices.update_one(
             {"_id": pairing["device_id"]},
-            {"$set": {"credential_hash": _digest(credential), "enabled": True,
+            {"$set": {"credential_hash": credential_hash(credential), "enabled": True,
                       "inventory": pairing["inventory"], "lastSeen": now(), "status": "Connecting"}},
             upsert=True,
         )
@@ -138,13 +129,23 @@ async def devices():
 async def heartbeat(request, payload):
     credential = request.headers.get("authorization", "").removeprefix("Bearer ")
     requested = request.headers.get("x-shop-id")
+    plain = credential_hash(credential)
     with unscoped():
-        device = await db.connector_devices.find_one(
-            {"credential_hash": _digest(credential), "enabled": True}
-        )
+        device = await db.connector_devices.find_one({"credential_hash": plain, "enabled": True})
+        kind = "current" if device else None
+        if not device:
+            old = legacy_credential_hash(credential, os.environ.get("CONNECTOR_SECRET"))
+            if old:
+                device = await db.connector_devices.find_one(
+                    {"credential_hash": old, "enabled": True}
+                )
+                kind = "legacy" if device else None
+    if device and kind == "legacy" and (device.get("shop_id") or PRINT2GO_SHOP_ID) != PRINT2GO_SHOP_ID:
+        device = None
     if not device:
         raise AppError("Connector authentication failed.", 401)
-    shop_id = bound_shop(device.get("shop_id"), requested)
+    owner = device.get("shop_id") or PRINT2GO_SHOP_ID
+    shop_id = bound_shop(owner, requested)
     with shop_scope(shop_id):
         await db.connector_devices.update_one(
             {"_id": device["_id"]},

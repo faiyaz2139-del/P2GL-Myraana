@@ -69,19 +69,24 @@ use a wildcard origin with credentialed production traffic.
 
 ## Local shop connector
 
-Set a random server-side `CONNECTOR_SECRET` through deployment secrets. Do not
-place it in source control or browser code. Download the local connector from
-Studio Shop settings, then configure its local environment with:
+Each shop pairs its own Windows Connector from Shop settings. The one-time code
+is scoped to that shop. Pairing does not use `CONNECTOR_SECRET`.
+
+`CONNECTOR_SECRET` remains the legacy path for the original Print2Go
+installation only. A request that names another shop is rejected. Do not place
+that secret in source control or browser code. The Print2Go script is
+`frontend/public/setup/print2go-connector.py`:
 
 ```text
 PRINT2GO_URL=https://your-studio-host
-CONNECTOR_SECRET=<same server secret>
+CONNECTOR_SECRET=<Print2Go server secret>
 PRINT2GO_FOLDER=/safe/non-printing-staging-folder
 ```
 
-The staging folder must not auto-print. The connector reports freshness and
-writability, accepts only exact authorized checksum handoffs, and never sends a
-physical print command.
+Other shops use the Windows Connector download on the Shop settings page and
+enter the pairing code there. The staging folder must not auto-print. The
+connector reports freshness and writability, accepts only exact authorized
+checksum handoffs, and never sends a physical print command.
 
 ## Production safety
 

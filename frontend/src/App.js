@@ -551,7 +551,7 @@ function ConnectorPairing({ settings, reload }) {
   };
   return <section className="settings-card" data-testid="connector-pairing-panel">
     <div className="section-heading"><h3>Connect Windows Connector</h3><Link2 /></div>
-    <p>Discovery is read-only. It cannot print, change printer settings, or release jobs.</p>
+    <p data-testid="connector-pairing-scope">This code pairs a connector for this shop only. Discovery is read-only. It cannot print, change printer settings, or release jobs.</p>
     <a className="button" href="https://github.com/faiyaz2139-del/P2GL-Myraana/releases/download/windows-connector-preview/MyraanaConnector.zip" data-testid="download-windows-connector-link">
       <Download size={16} />Download Windows Connector
     </a>
@@ -780,8 +780,9 @@ function Settings({ settings, user, reload }) {
       <section className="settings-card">
         <div className="section-heading"><h3>Connect shop</h3><Link2 /></div>
         <p data-testid="connector-status">{settings.connected ? "The connector reports a writable destination." : "No verified local connection. Use a proof-only route until a press is verified."}</p>
-        <a className="button" href="/setup/print2go-connector.py" download data-testid="download-connector-link"><Download size={16} />Download local connector</a>
-        <details className="technical"><summary data-testid="connector-setup-summary">Connection setup</summary><ol><li>Configure the server and shop computer with the same connector secret.</li><li>Set the HTTPS Studio URL and a writable staging folder.</li><li>Run the connector. It stages authorized PDFs only; it never prints.</li></ol></details>
+        <p data-testid="connector-shop-note">Each shop pairs its own Windows Connector from this page. The pairing code belongs to this shop only.</p>
+        {settings.legacyConnector && <a className="button" href="/setup/print2go-connector.py" download data-testid="download-connector-link"><Download size={16} />Download Print2Go legacy connector</a>}
+        <details className="technical"><summary data-testid="connector-setup-summary">Connection setup</summary><ol><li>Pair this shop’s Windows Connector with the one-time code below. No shared secret is required.</li><li>The original Print2Go installation can keep using its server connector secret. That secret does not open another shop.</li><li>The connector stages authorized PDFs only. It never prints.</li></ol></details>
       </section>
       {user.role === "admin" && <ConnectorPairing settings={settings} reload={reload} />}
       {user.role === "admin" && <CostProfiles />}

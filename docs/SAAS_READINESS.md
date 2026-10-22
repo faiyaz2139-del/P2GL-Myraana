@@ -49,7 +49,9 @@ Shop administrators invite an operator or another shop administrator with `POST 
 
 A shop status of `suspended` or `pending` blocks password sign-in and the next API call for that shop’s users. A missing status is treated as active so Print2Go keeps working before the backfill, and a later suspend is not cleared when the migration runs again. Self-serve signup, when both flags are on, still creates an active shop and sets the session cookie.
 
-The shared `CONNECTOR_SECRET` is bound to Print2Go only. A paired device credential is bound to the shop that approved it. If the request names a different shop (`X-Shop-Id`), the token is rejected with `connector-shop`.
+Each shop pairs its own Windows Connector from Shop settings. The pairing code and the device credential are stored as SHA-256 and are scoped to that shop. Pairing works when `CONNECTOR_SECRET` is unset. Another shop cannot list or approve the code.
+
+`CONNECTOR_SECRET` is the legacy bearer path for Print2Go only (`POST /api/connector` and `GET /api/connector/file`). Any other `X-Shop-Id` is rejected with `connector-shop`. A device credential that was hashed with that secret is accepted only when the device belongs to Print2Go, including a device saved before shop ids existed. The same hash on any other shop is rejected.
 
 ## Auth and roles
 
@@ -150,4 +152,4 @@ Also not built, on purpose:
 - Email: invite and password-reset mail can be sent when `EMAIL_PROVIDER` is smtp, resend, postmark, or ses. The default is log, which is not a mailbox. Do not invent a Myraana support address. Print2Go London’s published store address stays on print2go.com.
 - Hosting: the VM size, who holds MongoDB, and the window to copy production data off Emergent.
 - Legal: Privacy and Terms in the site are drafts. Replace them before another shop relies on them.
-- Second shop go-live, after a copy of the database has been booted with this build and Print2Go sign-in still works. Flags stay off until that check. Invite email, password reset, and the platform shop screen exist. A live mailbox still needs `EMAIL_PROVIDER` set to smtp, resend, postmark, or ses, because the default is log. Still missing before that is safe: per-shop Stripe (billing stays global and off), a data export or delete tool, and finished legal text. New shops use a paired connector; the shared connector secret stays Print2Go’s. GridFS chunks are not tagged. Hosting and DNS remain on hold.
+- Second shop go-live, after a copy of the database has been booted with this build and Print2Go sign-in still works. Flags stay off until that check. Invite email, password reset, the platform shop screen, and per-shop connector pairing exist. A live mailbox still needs `EMAIL_PROVIDER` set to smtp, resend, postmark, or ses, because the default is log. Still missing before that is safe: per-shop Stripe (billing stays global and off), a data export or delete tool, and finished legal text. The shared connector secret stays Print2Go’s legacy path. GridFS chunks are not tagged. Hosting and DNS remain on hold. There is no SSO.
