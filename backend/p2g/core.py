@@ -5,17 +5,21 @@ import hashlib
 from datetime import datetime, timezone
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorGridFSBucket
 
+from p2g.tenancy import TenantDatabase
+
 client = AsyncIOMotorClient(os.environ["MONGO_URL"])
-db = client[os.environ["DB_NAME"]]
-bucket = AsyncIOMotorGridFSBucket(db, bucket_name="pdf_files")
+raw_db = client[os.environ["DB_NAME"]]
+db = TenantDatabase(raw_db)
+bucket = AsyncIOMotorGridFSBucket(raw_db, bucket_name="pdf_files")
 LEASE_MS = 120000
 
 
 class AppError(Exception):
-    def __init__(self, message, status=409):
+    def __init__(self, message, status=409, code=None):
         super().__init__(message)
         self.message = message
         self.status = status
+        self.code = code
 
 
 def now():

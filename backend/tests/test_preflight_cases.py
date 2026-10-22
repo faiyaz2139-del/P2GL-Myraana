@@ -65,7 +65,7 @@ def test_low_resolution_image_stops():
 
 def test_wrong_dimensions_stop_without_scaling():
     report = inspect(artwork(width=4, height=3), RECIPE, 1)
-    assert any("does not match the recipe" in item for item in report["errors"])
+    assert any("does not match the finished size" in item for item in report["errors"])
 
 
 def test_unembedded_text_font_stops():

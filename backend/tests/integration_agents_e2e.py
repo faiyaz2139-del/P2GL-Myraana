@@ -112,6 +112,7 @@ class IntegrationRun:
         client, db = await self.database()
         await db.cost_profiles.insert_one(
             {
+                "shop_id": "print2go",
                 "id": "zztest-cost-profile",
                 "name": "ZZTEST sample only",
                 "enabled": True,
@@ -128,6 +129,7 @@ class IntegrationRun:
         )
         await db.machine_capabilities.insert_one(
             {
+                "shop_id": "print2go",
                 "enabled": True,
                 "stocks": "14pt matte",
                 "plan_id": "zztest-12up",
@@ -214,6 +216,10 @@ class IntegrationRun:
                     "stock": "14pt matte",
                     "finish": "Matte",
                     "due": "2030-01-01",
+                    "product": "business-card",
+                    "confirmed": True,
+                    "bleed": 0.125,
+                    "safe": 0.125,
                 },
             )
             self.job = response.json()
@@ -224,12 +230,23 @@ class IntegrationRun:
                     "POST",
                     f"/jobs/{self.job_id}/artwork",
                     files={"file": (v1.name, handle, "application/pdf")},
+                    data={"acknowledged": "true"},
                 )
             self.job = response.json()
             self.record("upload v1 original", response.status_code == 200, http=response.status_code)
             response = self.request("POST", f"/jobs/{self.job_id}/process", json={"generation": self.job["generation"]})
             self.record("inspection and PRINT_READY generation", response.status_code == 200, http=response.status_code)
             self.latest_job()
+            if self.job["tasks"][3]["status"] == "Waiting for operator":
+                response = self.request(
+                    "POST",
+                    f"/jobs/{self.job_id}/action",
+                    json={"action": "confirm-bleed", "generation": self.job["generation"], "acknowledged": True},
+                )
+                self.record("confirm bleed", response.status_code == 200, http=response.status_code)
+                response = self.request("POST", f"/jobs/{self.job_id}/process", json={"generation": self.job["generation"]})
+                self.record("process after bleed confirmation", response.status_code == 200, http=response.status_code)
+                self.latest_job()
             if self.job["tasks"][3]["status"] == "Needs attention":
                 response = self.request(
                     "POST",
@@ -449,6 +466,7 @@ class IntegrationRun:
                     "POST",
                     f"/jobs/{self.job_id}/artwork",
                     files={"file": (v2.name, handle, "application/pdf")},
+                    data={"acknowledged": "true"},
                 )
             self.job = response.json()
             self.record(
@@ -458,6 +476,14 @@ class IntegrationRun:
                 generation=self.job.get("generation"),
             )
             response = self.request("POST", f"/jobs/{self.job_id}/process", json={"generation": self.job["generation"]})
+            self.latest_job()
+            if self.job["tasks"][3]["status"] == "Waiting for operator":
+                self.request(
+                    "POST",
+                    f"/jobs/{self.job_id}/action",
+                    json={"action": "confirm-bleed", "generation": self.job["generation"], "acknowledged": True},
+                )
+                response = self.request("POST", f"/jobs/{self.job_id}/process", json={"generation": self.job["generation"]})
             self.record("changed artwork verified PRINT_READY", response.status_code == 200, http=response.status_code)
             response = self.request("POST", f"/jobs/{self.job_id}/agents/evaluate")
             data = response.json() if response.ok else {}
