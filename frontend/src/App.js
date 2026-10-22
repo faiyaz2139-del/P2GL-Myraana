@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
@@ -420,16 +420,16 @@ function JobView({ job, reload, back, settings, user, openSettings }) {
     if (current === 3 && !job.bleedConfirmation) return <HumanAction label="I confirm the bleed and safe area on this file." buttonLabel="Confirm bleed handling" ack={ack} setAck={setAck} busy={busy} testId="confirm-bleed" onAction={() => act("confirm-bleed", { acknowledged: ack })} />;
     if (current === 3) return <button className="primary" onClick={process} disabled={busy} data-testid="process-artwork-button"><ShieldCheck size={17} />{busy ? "Checking…" : "Prepare print-ready file"}</button>;
     if (current === 7) return <HumanAction label="I reviewed the actual proof, margins, and all notes." buttonLabel="Approve proof" ack={ack} setAck={setAck} busy={busy} testId="approve-proof" onAction={() => act("approve", { sha: proof?.sha, acknowledged: ack })} />;
-    if (current === 8) return <div>
-      <div className="action-row">
-        <button className="primary" onClick={() => act("route", { mode: "production" })} disabled={busy} data-testid="select-route-button">Use production route</button>
-        <button className="button" onClick={() => act("route", { mode: "proof-only" })} disabled={busy} data-testid="proof-only-route-button">Proof only</button>
-        <button className="text-button" onClick={openSettings} data-testid="verify-machine-link">Verify a machine in Shop settings</button>
-      </div>
-      {errorCode === "machine-required" && <p className="notice warning" data-testid="machine-required-notice">No verified press for this stock. Continue with a proof-only route, or verify a printer in Shop settings.</p>}
+    if (current === 8) return <RouteAction job={job} settings={settings} user={user} act={act} busy={busy} errorCode={errorCode} />;
+    if (current === 9 && job.route?.mode === "proof-only") return <div>
+      <p className="notice" data-testid="proof-only-stop">This job is a proof only, so it does not go to a press. Switch to production here if it should be printed.</p>
+      <button className="primary" onClick={() => act("route", { mode: "production" })} disabled={busy} data-testid="switch-production-route-button">Switch to production route</button>
     </div>;
     if (current === 9) return <RIPAction action={act} busy={busy} />;
-    if (current === 10) return <div className="action-row"><button className="primary" onClick={() => act("readiness")} disabled={busy} data-testid="check-readiness-button"><Link2 size={17} />Check shop readiness</button><button className="button" onClick={openSettings} data-testid="connect-shop-button">Connect shop</button></div>;
+    if (current === 10) return <div>
+      <p className="notice">The shop computer must be connected before this file can be staged. Start the connector, then check again. This step does not print.</p>
+      <div className="action-row"><button className="primary" onClick={() => act("readiness")} disabled={busy} data-testid="check-readiness-button"><Link2 size={17} />Check shop readiness</button><button className="button" onClick={openSettings} data-testid="connect-shop-button">Connect shop</button></div>
+    </div>;
     if (current === 11) return <HumanAction label="I authorize staging this exact approved PDF. This does not print it." buttonLabel="Authorize production" ack={ack} setAck={setAck} busy={busy} testId="authorize-production" onAction={() => act("authorize", { sha: proof?.sha, acknowledged: ack })} />;
     if (current === 12) return <HumanAction label="The sheets have physically printed. A file copy does not count." buttonLabel="Confirm printed" ack={ack} setAck={setAck} busy={busy} testId="confirm-printed" onAction={() => act("printed", { acknowledged: ack })} />;
     if (current === 13) return <div><p className="notice" data-testid="cutting-instructions">{job.recipe.cutInstructions}</p><HumanAction label="The pieces have been cut and finished as ordered." buttonLabel="Confirm cut" ack={ack} setAck={setAck} busy={busy} testId="confirm-cut" onAction={() => act("cut", { acknowledged: ack })} /></div>;
@@ -438,6 +438,12 @@ function JobView({ job, reload, back, settings, user, openSettings }) {
     if (current === 15) return <PackAction action={act} busy={busy} />;
     return null;
   };
+  const readinessTried = useRef(false);
+  useEffect(() => {
+    if (current !== 10 || job.state !== "active" || readinessTried.current) return;
+    readinessTried.current = true;
+    act("readiness");
+  }, [current, job.id, job.state]);
   const control = async (state) => {
     setBusy(true);
     try {
@@ -471,14 +477,69 @@ function HumanAction({ label, buttonLabel, ack, setAck, busy, onAction, testId }
   return <div><label className="check-label"><input type="checkbox" checked={ack} onChange={(event) => setAck(event.target.checked)} data-testid={`${testId}-checkbox`} />{label}</label><button className="primary" disabled={busy || !ack} onClick={onAction} data-testid={`${testId}-button`}>{buttonLabel}</button></div>;
 }
 
+function RouteAction({ job, settings, user, act, busy, errorCode }) {
+  const [printer, setPrinter] = useState(settings?.printer || "");
+  const [localError, setLocalError] = useState("");
+  const stocks = settings?.stocks || [];
+  const verified = settings?.verifiedPrinters || [];
+  const stockListed = stocks.includes(job.stock);
+  const printerOk = Boolean(printer.trim()) && (verified.length === 0 || verified.includes(printer.trim()));
+  const needsSetup = !stockListed || !printerOk;
+  const verifyAndRoute = async () => {
+    const name = printer.trim();
+    if (name.length < 2) {
+      setLocalError("Type the press name. Virtual printers such as Print to PDF cannot be used.");
+      return;
+    }
+    setLocalError("");
+    try {
+      await api("printers/verify", { method: "POST", body: JSON.stringify({ name, use: true }) });
+      await api("settings", {
+        method: "POST",
+        body: JSON.stringify({
+          shopName: settings?.shopName || "Print2Go",
+          printer: name,
+          stocks: [...new Set([...stocks, job.stock])],
+          sides: [1, 2],
+          instructions: settings?.instructions || "",
+        }),
+      });
+      await act("route", { mode: "production" });
+    } catch (reason) {
+      setLocalError(reason.message);
+    }
+  };
+  return <div data-testid="route-step">
+    <p className="notice">
+      {needsSetup
+        ? `${job.stock} ${stockListed ? "is on the press list" : "is not on the press list yet"}. ${printerOk ? `${printer} can run it.` : "Type the shop press and verify it here. You do not need to leave this job."}`
+        : `${printer} can run ${job.stock}. Production stages the file. Proof only stops before the press.`}
+    </p>
+    {user?.role === "admin" && needsSetup && <label>Printer name<input value={printer} onChange={(event) => setPrinter(event.target.value)} data-testid="inline-printer-input" /></label>}
+    <div className="action-row">
+      <button className="primary" onClick={() => act("route", { mode: "production" })} disabled={busy || needsSetup} data-testid="select-route-button">Use production route</button>
+      {user?.role === "admin" && needsSetup && <button className="button" onClick={verifyAndRoute} disabled={busy || printer.trim().length < 2} data-testid="inline-verify-printer-button">Verify printer and add this stock</button>}
+      <button className="button" onClick={() => act("route", { mode: "proof-only" })} disabled={busy} data-testid="proof-only-route-button">Proof only</button>
+    </div>
+    {user?.role !== "admin" && needsSetup && <p className="notice warning" data-testid="route-admin-needed">A shop admin needs to verify a printer for this stock. You can choose Proof only now.</p>}
+    {(localError || errorCode === "machine-required") && <p className="notice warning" data-testid="machine-required-notice">{localError || "Verify the printer above, or choose Proof only. Nothing is sent to a press until you do."}</p>}
+  </div>;
+}
+
 function RIPAction({ action, busy }) {
   const [note, setNote] = useState("");
   return <div><label>RIP job name and imposition settings<input value={note} onChange={(event) => setNote(event.target.value)} minLength="5" data-testid="rip-note-input" /></label><button className="primary" disabled={busy || note.length < 5} onClick={() => action("handoff", { note })} data-testid="confirm-rip-staging-button">Confirm RIP staging</button></div>;
 }
 
 function QCAction({ action, busy }) {
+  const labels = {
+    quantity: "Quantity matches the order",
+    alignment: "Alignment matches the proof",
+    appearance: "Colour and type look right",
+    finishing: "Fold, cut, and finish match the order",
+  };
   const [checks, setChecks] = useState({ quantity: false, alignment: false, appearance: false, finishing: false });
-  return <div><div className="qc-grid">{Object.keys(checks).map((key) => <label className="check-label" key={key}><input type="checkbox" checked={checks[key]} onChange={(event) => setChecks({ ...checks, [key]: event.target.checked })} data-testid={`qc-${key}-checkbox`} />{key} passed</label>)}</div><button className="primary" disabled={busy} onClick={() => action("qc", { checks })} data-testid="record-qc-button">Record quality check</button></div>;
+  return <div><div className="qc-grid">{Object.keys(checks).map((key) => <label className="check-label" key={key}><input type="checkbox" checked={checks[key]} onChange={(event) => setChecks({ ...checks, [key]: event.target.checked })} data-testid={`qc-${key}-checkbox`} />{labels[key]}</label>)}</div><button className="primary" disabled={busy} onClick={() => action("qc", { checks })} data-testid="record-qc-button">Record quality check</button></div>;
 }
 
 function PackAction({ action, busy }) {

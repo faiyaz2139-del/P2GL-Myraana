@@ -45,6 +45,81 @@ function readLocal() {
   }
 }
 
+function dueInTwoDays() {
+  const date = new Date();
+  date.setDate(date.getDate() + 2);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function firstQuantity(preset) {
+  const values = preset?.quantities || [];
+  for (const value of values) {
+    const number = Number(String(value).replace(/,/g, ""));
+    if (Number.isFinite(number) && number >= 1) return number;
+  }
+  return 100;
+}
+
+function defaultShape(preset) {
+  const shapes = preset?.shapes || [];
+  const name = (preset?.name || "").toLowerCase();
+  const named = shapes.find((item) => name.includes(String(item).toLowerCase().split(" ")[0]));
+  if (named) return named;
+  if (shapes.length === 1) return shapes[0];
+  return "rectangle";
+}
+
+function defaultGrommets(preset) {
+  for (const item of preset?.hardware || []) {
+    const match = String(item).match(/(\d+)\s*grommet/i);
+    if (match) return Number(match[1]);
+  }
+  return 0;
+}
+
+export function defaultsFromPreset(preset, rules = {}) {
+  const size = preset?.sizes?.[0];
+  const custom = preset?.customSize;
+  const width = size?.width ?? (custom?.width_min ?? "");
+  const height = size?.height ?? (custom?.height_min ?? "");
+  const unit = size?.unit || custom?.unit || "in";
+  const sides = Array.isArray(preset?.sides) && preset.sides.length === 1 ? String(preset.sides[0]) : "2";
+  return {
+    sizeId: size?.id || "custom",
+    width,
+    height,
+    unit,
+    quantity: firstQuantity(preset),
+    sides,
+    stock: preset?.stocks?.[0] || "Shop stock",
+    finish: preset?.finishes?.[0] || "Shop finish",
+    bleed: rules.bleedInches ?? 0.125,
+    safe: rules.safeInches ?? 0.25,
+    fold: preset?.folds?.length === 1 ? preset.folds[0] : "none",
+    shape: defaultShape(preset),
+    dieCut: /die-?\s*cut|kiss-?\s*cut/i.test(preset?.name || ""),
+    grommets: defaultGrommets(preset),
+    binding: preset?.binding?.length === 1 ? preset.binding[0] : "",
+    hardware: preset?.hardware?.length === 1 ? preset.hardware[0] : "",
+  };
+}
+
+function offerKind(preset) {
+  if (!preset || preset.kind === "service") return "service";
+  const name = (preset.name || "").toLowerCase();
+  if ((preset.category || "").startsWith("Clothing") || /t-shirt|hoodie|polo/.test(name)) return "apparel";
+  if (/mug|tumbler|water bottle|wine cup|flask/.test(name)) return "drinkware";
+  if (/^(3 hole punch|folding|stapling)$/.test(name) || /binding$/.test(name) || name.includes("scoring & perforation")) return "finishing";
+  if (/stamp|notary seal|nfc contactless|popup counter|snap frame/.test(name)) return "manufactured";
+  if (name === "booklets" || name.includes("12 months")) return "multipage";
+  if (name.endsWith("labels sheet")) return "nup";
+  if (name === "ncr forms") return "multipart";
+  if (name === "feather flags" || name === "tear drop flags") return "flag";
+  return "print";
+}
+
 function groups(presets) {
   const featured = ["business-card", "flyer", "custom"]
     .map((id) => presets.find((item) => item.id === id))
@@ -64,50 +139,57 @@ export function JobModal({ catalog, settings, close, created }) {
   const saved = useMemo(() => ({ ...(readLocal() || {}), ...(settings?.jobDefaults || {}) }), [settings]);
   const rules = settings?.artworkRules || {};
   const starting = presets.find((item) => item.id === (saved.product || "business-card")) || presets[0];
-  const startingSize = saved.sizeId === "custom"
-    ? null
-    : ((starting?.sizes || []).find((item) => item.id === saved.sizeId) || starting?.sizes?.[0]);
+  const seeded = defaultsFromPreset(starting, rules);
+  const repeat = saved.product && saved.product === starting?.id;
   const [productId, setProductId] = useState(starting?.id || "custom");
-  const [sizeId, setSizeId] = useState(saved.sizeId || startingSize?.id || "custom");
-  const [width, setWidth] = useState(saved.width ?? startingSize?.width ?? "");
-  const [height, setHeight] = useState(saved.height ?? startingSize?.height ?? "");
-  const [unit, setUnit] = useState(saved.unit || startingSize?.unit || "in");
-  const [quantity, setQuantity] = useState(saved.quantity ?? 500);
-  const [sides, setSides] = useState(String(saved.sides ?? 2));
-  const [stock, setStock] = useState(saved.stock || starting?.stocks?.[0] || "14pt matte");
-  const [finish, setFinish] = useState(saved.finish || starting?.finishes?.[0] || "Matte");
-  const [bleed, setBleed] = useState(saved.bleed ?? rules.bleedInches ?? 0.125);
-  const [safe, setSafe] = useState(saved.safe ?? rules.safeInches ?? 0.25);
-  const [fold, setFold] = useState(saved.options?.fold || "none");
-  const [shape, setShape] = useState(saved.options?.shape || "");
-  const [dieCut, setDieCut] = useState(Boolean(saved.options?.dieCut));
-  const [grommets, setGrommets] = useState(saved.options?.grommets ?? 0);
-  const [binding, setBinding] = useState(saved.options?.binding || "");
-  const [hardware, setHardware] = useState(saved.options?.hardware || "");
+  const [sizeId, setSizeId] = useState(repeat ? (saved.sizeId || seeded.sizeId) : seeded.sizeId);
+  const [width, setWidth] = useState(repeat ? (saved.width ?? seeded.width) : seeded.width);
+  const [height, setHeight] = useState(repeat ? (saved.height ?? seeded.height) : seeded.height);
+  const [unit, setUnit] = useState(repeat ? (saved.unit || seeded.unit) : seeded.unit);
+  const [quantity, setQuantity] = useState(repeat ? (saved.quantity ?? seeded.quantity) : seeded.quantity);
+  const [sides, setSides] = useState(String(repeat ? (saved.sides ?? seeded.sides) : seeded.sides));
+  const [stock, setStock] = useState(repeat ? (saved.stock || seeded.stock) : seeded.stock);
+  const [finish, setFinish] = useState(repeat ? (saved.finish || seeded.finish) : seeded.finish);
+  const [bleed, setBleed] = useState(saved.bleed ?? seeded.bleed);
+  const [safe, setSafe] = useState(saved.safe ?? seeded.safe);
+  const [fold, setFold] = useState(repeat ? (saved.options?.fold || seeded.fold) : seeded.fold);
+  const [shape, setShape] = useState(repeat ? (saved.options?.shape || seeded.shape) : seeded.shape);
+  const [dieCut, setDieCut] = useState(repeat ? Boolean(saved.options?.dieCut) : seeded.dieCut);
+  const [grommets, setGrommets] = useState(repeat ? (saved.options?.grommets ?? seeded.grommets) : seeded.grommets);
+  const [binding, setBinding] = useState(repeat ? (saved.options?.binding || seeded.binding) : seeded.binding);
+  const [hardware, setHardware] = useState(repeat ? (saved.options?.hardware || seeded.hardware) : seeded.hardware);
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const preset = presets.find((item) => item.id === productId) || starting;
   const { featured, byCategory, services } = groups(presets);
-  const stockOptions = [...new Set([...(settings?.stocks || []), ...(preset?.stocks || []), ...(catalog?.vocabulary?.stocks || [])])];
-  const finishOptions = [...new Set([...(preset?.finishes || []), ...(catalog?.vocabulary?.finishes || []), "Matte", "Gloss", "Soft touch", "Uncoated"])];
-  const shapeOptions = [...new Set([...(preset?.shapes || []), ...(catalog?.vocabulary?.shapes || [])])];
-  const bindingOptions = [...new Set([...(preset?.binding || []), ...(catalog?.vocabulary?.binding || [])])];
-  const hardwareOptions = [...new Set([...(preset?.hardware || []), ...(catalog?.vocabulary?.hardware || [])])];
+  const stockOptions = [...new Set([...(preset?.stocks || []), ...(settings?.stocks || [])])];
+  const finishOptions = [...new Set([...(preset?.finishes || []), "Matte", "Gloss", "Soft touch", "Uncoated"])];
+  const shapeOptions = [...new Set(preset?.shapes || [])];
+  const bindingOptions = [...new Set(preset?.binding || [])];
+  const hardwareOptions = [...new Set(preset?.hardware || [])];
+  const kind = offerKind(preset);
+  const customHint = preset?.customSize;
+  const hintReady = customHint && customHint.width_min != null && customHint.height_min != null;
 
   const chooseProduct = (id) => {
     const next = presets.find((item) => item.id === id);
+    const defaults = defaultsFromPreset(next, rules);
     setProductId(id);
-    const size = next?.sizes?.[0];
-    setSizeId(size?.id || "custom");
-    if (size) {
-      setWidth(size.width);
-      setHeight(size.height);
-      setUnit(size.unit || "in");
-    }
-    if (next?.stocks?.length) setStock(next.stocks[0]);
-    if (next?.finishes?.length) setFinish(next.finishes[0]);
-    setFold("none");
+    setSizeId(defaults.sizeId);
+    setWidth(defaults.width);
+    setHeight(defaults.height);
+    setUnit(defaults.unit);
+    setQuantity(defaults.quantity);
+    setSides(defaults.sides);
+    setStock(defaults.stock);
+    setFinish(defaults.finish);
+    setFold(defaults.fold);
+    setShape(defaults.shape);
+    setDieCut(defaults.dieCut);
+    setGrommets(defaults.grommets);
+    setBinding(defaults.binding);
+    setHardware(defaults.hardware);
   };
 
   const chooseSize = (id) => {
@@ -201,6 +283,14 @@ export function JobModal({ catalog, settings, close, created }) {
           </select>
         </label>
         {preset?.summary && <p className="tiny">{preset.summary}</p>}
+        {kind === "apparel" && <p className="notice warning" data-testid="non-print-notice">This is apparel, not a paper job. You can store a decoration size, but Myraana does not produce the garment.</p>}
+        {kind === "drinkware" && <p className="notice warning" data-testid="non-print-notice">This is drinkware, not a paper job. You can store a decoration size, but Myraana does not produce the item.</p>}
+        {kind === "finishing" && <p className="notice warning" data-testid="non-print-notice">This is a finishing step, not a print file. Myraana does not punch, bind, or fold it. Choose a print product if the order needs a PDF.</p>}
+        {kind === "manufactured" && <p className="notice warning" data-testid="non-print-notice">Myraana does not manufacture this item. You can store a face size, and no print-ready file is made for the object.</p>}
+        {kind === "multipage" && <p className="notice warning" data-testid="non-print-notice">This needs more than a front and a back. Myraana does not impose booklets or multi-page calendars yet.</p>}
+        {kind === "nup" && <p className="notice warning" data-testid="non-print-notice">These sizes are one label, and the product is many labels on a sheet. Myraana does not build that sheet.</p>}
+        {kind === "multipart" && <p className="notice warning" data-testid="non-print-notice">This is a multi-part carbonless set. A one-sheet PDF would not be the form.</p>}
+        {kind === "flag" && <p className="notice warning" data-testid="non-print-notice">Only a flag height is listed (8 ft, 11 ft, or 13 ft). The catalog does not publish a width, so there is no trim to check.</p>}
         <div className="form-grid">
           <label>Preset size
             <select value={sizeId} onChange={(event) => chooseSize(event.target.value)} data-testid="job-size-select">
@@ -240,7 +330,7 @@ export function JobModal({ catalog, settings, close, created }) {
               {FOLDS.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
             </select>
           </label>
-          <label>Due date<input name="due" type="date" required aria-label="Due date, YYYY-MM-DD" data-testid="job-due-input" /></label>
+          <label>Due date<input name="due" type="date" required defaultValue={dueInTwoDays()} aria-label="Due date, YYYY-MM-DD" data-testid="job-due-input" /></label>
           <label>Shape
             <input value={shape} onChange={(event) => setShape(event.target.value)} list="shape-options" maxLength="140" placeholder="rectangle" data-testid="job-shape-input" />
             <datalist id="shape-options">{shapeOptions.map((item) => <option key={item} value={item} />)}</datalist>
@@ -259,7 +349,9 @@ export function JobModal({ catalog, settings, close, created }) {
           <input type="checkbox" checked={dieCut} onChange={(event) => setDieCut(event.target.checked)} data-testid="job-diecut-checkbox" />
           Die-cut as specified
         </label>
-        {preset?.customSize && <p className="tiny">Catalog size hint: {preset.customSize.width_min}–{preset.customSize.width_max} × {preset.customSize.height_min}–{preset.customSize.height_max} {preset.customSize.unit}. The job still accepts another size inside the shop limit of 150 inches.</p>}
+        {hintReady && <p className="tiny">Catalog size starts at {customHint.width_min} × {customHint.height_min} {customHint.unit}. You can change it. The shop limit is 150 inches.</p>}
+        {preset?.folds?.length > 1 && fold === "none" && <p className="tiny">Folds offered: {preset.folds.join(", ")}. No fold is selected until you choose one.</p>}
+        {!preset?.sizes?.length && !hintReady && kind === "print" && <p className="tiny">This preset has no size. Type the finished width and height for this order.</p>}
         <label className="check-label">
           <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} required data-testid="job-confirm-checkbox" />
           I confirm these order details.

@@ -112,21 +112,21 @@ JPG, PNG, and GIF are placed at their native size and DPI. AI, EPS, and PSD are 
 | Catalog items | 139 |
 | Print products | 134 |
 | Services | 5 |
-| Presets with a parsed size or a custom-size range | 101 |
-| Presets with no parsed size | 33 |
-| End-to-end tested through PRINT_READY | Business card, flyer |
+| Presets with a parsed size or a custom-size range | 103 |
+| Presets with no parsed size | 31 |
+| End-to-end tested through PRINT_READY | See `docs/PRODUCT_READINESS.md` |
 
 Featured presets are Business card, Flyer, and Custom product. Card sizes include the US 3.5 × 2 in card. Flyer sizes include 4×6, 5×7, 5.5×8.5, and 8.5×11 in, plus a custom size and an optional fold (half, tri, Z, gate, accordion). The flyer page itself does not list folds; those folds come from the menu pages and stay optional. Fold defaults to none.
 
-The other 101 sized presets can prefill a job: posters, labels, booklets, placemats, and the rest of the parsed catalog. Custom size, stock, finish, sides, fold, shape, die-cut, grommets, binding, and hardware are fields on every print job. A custom-size range on a preset is a hint. The pipeline accepts another size from 0.4 to 150 inches after converting in, mm, cm, or ft. One catalog poster listed 1200 inches; that value is not sent to the PDF builder.
+The other sized presets can prefill a job: posters, labels, booklets, placemats, and the rest of the parsed catalog. Giant Cheques parses as 24 × 48 in. Die-Cut Stickers takes its 1–60 in range from the product page. Custom size, stock, finish, sides, fold, shape, die-cut, grommets, binding, and hardware are fields on every print job. A custom-size range on a preset is a hint. The pipeline accepts another size from 0.4 to 150 inches after converting in, mm, cm, or ft. One catalog poster listed 1200 inches; that value is not sent to the PDF builder.
 
 Services cannot become print jobs: Fax Services, Graphic Design and Digital Services, Product Photography, Scanning Services, Shipping Services.
 
 ### What is seeded but not fully produced
 
-These 33 catalog rows have no size the parser could trust. They still appear in the product list as custom-spec jobs, and the same options (fold, binding, shape, hardware) can be stored on any print job. The studio does not run a separate machine path for them:
+These 31 catalog rows have no size the parser could trust. They still appear in the product list as custom-spec jobs, and the same options (fold, binding, shape, hardware) can be stored on any print job. The studio does not run a separate machine path for them:
 
-Business Laser Cheques, 3 Hole Punch, Cerlox (Comb) Binding, Coil (Spiral) Binding, Custom Tab Printing, Folding, Perfect Binding, Saddle Stitch Binding, Scoring & Perforation, Stapling, Wire-O Binding, Store Front Signs, Office & Store Branding Signs, Clear Labels & Stickers, Die-Cut Stickers, Kiss-Cut Sticker Singles, Perforated Window Stickers, UV DTF Image Transfer Stickers, Travel Tumbler, Water Bottle, Wine Cup, Custom Gift Wrap, Custom Mugs, Print2Go Studio, Fabric Banners, Popup Counter, Snap Frame, Feather Flags, Tear Drop Flags, Wall Flags, Blue Backed Posters, Giant Cheques, Sold Key Sign.
+Business Laser Cheques (the listing with no sizes), 3 Hole Punch, Cerlox (Comb) Binding, Coil (Spiral) Binding, Custom Tab Printing, Folding, Perfect Binding, Saddle Stitch Binding, Scoring & Perforation, Stapling, Wire-O Binding, Store Front Signs, Office & Store Branding Signs, Clear Labels & Stickers, Kiss-Cut Sticker Singles, Perforated Window Stickers, UV DTF Image Transfer Stickers, Travel Tumbler, Water Bottle, Wine Cup, Custom Gift Wrap, Custom Mugs, Print2Go Studio, Fabric Banners, Popup Counter, Snap Frame, Feather Flags, Tear Drop Flags, Wall Flags, Blue Backed Posters, Sold Key Sign.
 
 Also not built, on purpose:
 
@@ -138,10 +138,10 @@ Also not built, on purpose:
 
 ## QA behaviour in this pass
 
-- Production route requires a printer name and a stock the shop lists. If any printer has been verified, the route printer must be one of them. An empty verified list still allows a typed printer name, so the current shop is not locked out. The error code is `machine-required`. Proof-only sets the route and does not authorize printing.
+- Production route requires a printer name and a stock the shop lists. If any printer has been verified, the route printer must be one of them. An empty verified list still allows a typed printer name, so the current shop is not locked out. The route step says which of those is missing. A shop admin can verify a printer and add the job stock on that step. An operator can choose Proof only, and the step says an admin has to verify the press. The error code is `machine-required`. Proof-only sets the route and does not authorize printing.
 - Virtual printers (Print to PDF, XPS, OneNote, Adobe PDF, and the same class of drivers and ports) are dropped when a connector inventory is saved. The settings screen shows device status and production status separately: Connected or Offline, Verified or Not verified.
 - After proof approval, the job badge says Proof approved while the active step is Choose production route.
-- Capturing the order, uploading artwork, and confirming bleed each wait for an explicit confirmation. A correct bleed does not mark that step done by itself.
+- Capturing the order and confirming bleed still wait for an explicit confirmation. Uploading artwork starts the check immediately. After bleed is confirmed, or a blank border is accepted, the print-ready file is built and verified without another click. Proof approval stays manual.
 - A production review that passes some checks and then stops says how many checks passed. “Not production-ready” is only the headline when nothing passed. The review still stops at the first stop.
 - Due date is a calendar date. The last job’s product, size, stock, finish, and options are stored on the shop and in this browser.
 
