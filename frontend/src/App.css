@@ -24,3 +24,15 @@ img.brand-mark{width:40px;height:40px;border-radius:11px;background:transparent;
 .data-table th{font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
 .table-wrap{overflow-x:auto;margin:16px 0 28px}
 .row-actions{display:flex;gap:8px}
+.kind-badge{display:inline-flex;align-items:center;border-radius:999px;padding:2px 8px;font-size:12px;font-weight:650;border:1px solid var(--line);margin:0 8px 0 0;vertical-align:middle}
+.kind-ask{background:#fff4cc;color:#6a4b00}
+.kind-photoshop{background:#e7f0ff;color:#1d4e9e}
+.kind-fiery{background:#f3e8ff;color:#6b21a8}
+.kind-decision{background:#fff;color:#1d2b42}
+.kind-stop{background:#fde8e4;color:#9f2d1c}
+.kind-start{background:#e5f6ee;color:#0f6b45}
+.kind-legend{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+.london-steps{list-style:none;padding:0;margin:12px 0;display:grid;gap:8px}
+.london-steps li{padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+.london-steps li.done{opacity:.72}
+.london-steps li p{color:var(--muted);font-size:13px}
