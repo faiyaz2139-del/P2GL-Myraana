@@ -89,16 +89,17 @@ function Auth({ auth, onSignedIn }) {
     setBusy(true);
     setError("");
     try {
-      const result = invite
-        ? await api("public/invites/accept", {
+      if (invite) {
+        await api("public/invites/accept", {
           method: "POST",
           body: JSON.stringify({
             token: invite,
             name: form.get("name"),
             password: form.get("password"),
           }),
-        })
-        : await api(`auth/${auth.needsSetup ? "setup" : "login"}`, {
+        });
+      } else {
+        await api(`auth/${auth.needsSetup ? "setup" : "login"}`, {
           method: "POST",
           body: JSON.stringify({
             name: form.get("name"),
@@ -107,7 +108,10 @@ function Auth({ auth, onSignedIn }) {
             shop: form.get("shop") || "",
           }),
         });
-      onSignedIn(result.user);
+      }
+      const session = await api("auth");
+      if (!session?.user) throw new Error("Sign in to your shop.");
+      onSignedIn(session.user);
     } catch (reason) {
       setError(reason.message);
     } finally {
@@ -328,7 +332,7 @@ function AssistantPanel({ job, settings, user, reload }) {
   </aside>;
 }
 
-function JobView({ job, reload, back, settings, user, openSettings }) {
+function JobView({ job, reload, back, settings, user, openSettings, onArchived }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [errorCode, setErrorCode] = useState("");
@@ -455,8 +459,20 @@ function JobView({ job, reload, back, settings, user, openSettings }) {
       setBusy(false);
     }
   };
+  const archive = async () => {
+    setBusy(true);
+    try {
+      await api(`jobs/${job.id}/archive`, { method: "POST", body: "{}" });
+      if (onArchived) await onArchived();
+      else back();
+    } catch (reason) {
+      setError(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  };
   return <div className="job-shell" data-testid="job-detail-view">
-    <div className="job-toolbar"><button className="text-button" onClick={back} data-testid="back-to-jobs-button"><ArrowLeft size={16} />All jobs</button><span className="job-id">JOB {job.id.slice(0, 8).toUpperCase()}</span>{job.state === "active" && <button className="text-button" onClick={() => control("paused")} data-testid="pause-job-button"><Pause size={16} />Pause</button>}{job.state === "paused" && <button className="text-button" onClick={() => control("active")} data-testid="resume-job-button"><Play size={16} />Resume</button>}{job.state !== "complete" && job.state !== "cancelled" && <button className="text-button" onClick={() => control("cancelled")} data-testid="cancel-job-button"><X size={16} />Cancel</button>}</div>
+    <div className="job-toolbar"><button className="text-button" onClick={back} data-testid="back-to-jobs-button"><ArrowLeft size={16} />All jobs</button><span className="job-id">JOB {job.id.slice(0, 8).toUpperCase()}</span>{job.state === "active" && <button className="text-button" onClick={() => control("paused")} data-testid="pause-job-button"><Pause size={16} />Pause</button>}{job.state === "paused" && <button className="text-button" onClick={() => control("active")} data-testid="resume-job-button"><Play size={16} />Resume</button>}{job.state !== "complete" && job.state !== "cancelled" && !job.archived && <button className="text-button" onClick={() => control("cancelled")} data-testid="cancel-job-button"><X size={16} />Cancel</button>}{user?.role === "admin" && !job.archived && <button className="text-button" onClick={archive} disabled={busy} data-testid="archive-job-button">Archive</button>}</div>
     <div className="split-workspace"><AssistantPanel job={job} settings={settings} user={user} reload={reload} />
     <div className="execution-panel">
       {error && <p className="notice warning" data-testid="job-action-error">{error}</p>}
@@ -847,7 +863,7 @@ function Settings({ settings, user, reload }) {
       </section>
       {user.role === "admin" && <ConnectorPairing settings={settings} reload={reload} />}
       {user.role === "admin" && <CostProfiles />}
-      {user.role === "admin" && <Operators />}
+      {user.role === "admin" && <Operators user={user} />}
     </div>
     <aside className="settings-aside">
       <ShieldCheck size={26} />
@@ -862,11 +878,12 @@ function Settings({ settings, user, reload }) {
   </main>;
 }
 
-function Operators() {
+function Operators({ user }) {
   const [message, setMessage] = useState("");
   const [inviteMessage, setInviteMessage] = useState("");
   const [inviteLink, setInviteLink] = useState("");
   const [pending, setPending] = useState([]);
+  const [people, setPeople] = useState([]);
   const [busy, setBusy] = useState(false);
   const loadInvites = async () => {
     try {
@@ -875,7 +892,27 @@ function Operators() {
       setInviteMessage(reason.message);
     }
   };
-  useEffect(() => { loadInvites(); }, []);
+  const loadPeople = async () => {
+    try {
+      setPeople(await api("users"));
+    } catch (reason) {
+      setMessage(reason.message);
+    }
+  };
+  useEffect(() => { loadInvites(); loadPeople(); }, []);
+  const removePerson = async (person) => {
+    setBusy(true);
+    setMessage("");
+    try {
+      await api(`users/${person.id}/remove`, { method: "POST", body: "{}" });
+      setMessage(`${person.name} was removed. Their session has ended.`);
+      await loadPeople();
+    } catch (reason) {
+      setMessage(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  };
   const submit = async (event) => {
     event.preventDefault();
     const formNode = event.currentTarget;
@@ -887,6 +924,7 @@ function Operators() {
       });
       formNode.reset();
       setMessage("Operator account created.");
+      await loadPeople();
     } catch (reason) {
       setMessage(reason.message);
     } finally {
@@ -943,8 +981,15 @@ function Operators() {
     }
   };
   return <section className="settings-card" data-testid="operators-section">
-    <div className="section-heading"><h3>Operators</h3><Users size={21} /></div>
+    <div className="section-heading"><h3>People</h3><Users size={21} /></div>
     {message && <p className="notice" data-testid="operator-message">{message}</p>}
+    <ul className="plain-list" data-testid="shop-users">
+      {people.map((person) => <li key={person.id} data-testid={`shop-user-${person.id}`}>
+        <span>{person.name} · {person.email} · {person.role}</span>
+        {person.id !== user.id && <button type="button" className="text-button" disabled={busy} data-testid={`remove-user-${person.id}`} onClick={() => removePerson(person)}>Remove</button>}
+      </li>)}
+    </ul>
+    <h3>Add someone</h3>
     <form onSubmit={submit} data-testid="operator-form">
       <div className="form-grid">
         <label>Name<input name="name" required maxLength="80" data-testid="operator-name-input" /></label>
@@ -1063,6 +1108,7 @@ function Studio() {
   const params = useParams();
   const jobId = params.jobId || location.pathname.match(/^\/jobs\/([^/]+)/)?.[1];
   const [auth, setAuth] = useState(null);
+  const authEpoch = useRef(0);
   const [jobs, setJobs] = useState([]);
   const [recipes, setRecipes] = useState([]);
   const [settings, setSettings] = useState(null);
@@ -1089,7 +1135,15 @@ function Studio() {
       setError(reason.message);
     }
   };
-  useEffect(() => { api("auth").then(setAuth).catch((reason) => setError(reason.message)); }, []);
+  useEffect(() => {
+    const epoch = ++authEpoch.current;
+    api("auth").then((session) => {
+      if (epoch !== authEpoch.current) return;
+      setAuth((current) => (current?.user ? current : session));
+    }).catch((reason) => {
+      if (epoch === authEpoch.current) setError(reason.message);
+    });
+  }, []);
   const shopOpen = !auth?.user?.shop_status || auth.user.shop_status === "active";
   useEffect(() => { if (auth?.user && auth.user.role !== "superadmin" && shopOpen) load(); }, [auth?.user, shopOpen]);
   useEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
@@ -1113,7 +1167,7 @@ function Studio() {
   if (!auth) return <div className="auth-shell" data-testid="loading-screen"><p>{error || "Opening your shop…"}</p></div>;
   if (!auth.user) {
     if (location.pathname !== "/login") return <Navigate to="/login" replace />;
-    return <Auth auth={auth} onSignedIn={(user) => { setAuth({ user, needsSetup: false }); navigate("/jobs"); }} />;
+    return <Auth auth={auth} onSignedIn={(user) => { authEpoch.current += 1; setAuth({ user, needsSetup: false }); navigate("/jobs"); }} />;
   }
   const signOut = async () => {
     await api("auth/logout", { method: "POST", body: "{}" });
@@ -1154,7 +1208,7 @@ function Studio() {
         })}</div>}
       <footer className="page-foot"><ShieldCheck size={15} />Approvals stay tied to the exact production file.</footer>
     </main>}
-    {view === "jobs" && job && <JobView job={job} settings={settings} user={auth.user} reload={reloadJob} back={() => navigate("/jobs")} openSettings={() => navigate("/settings")} />}
+    {view === "jobs" && job && <JobView job={job} settings={settings} user={auth.user} reload={reloadJob} back={() => navigate("/jobs")} openSettings={() => navigate("/settings")} onArchived={async () => { setJob(null); navigate("/jobs"); await load(); }} />}
     {view === "recipes" && <Recipes recipes={recipes} catalog={catalog} reload={load} user={auth.user} />}
     {view === "settings" && settings && <Settings settings={settings} user={auth.user} reload={load} />}
     {newJob && <JobModal catalog={catalog} settings={settings} close={() => setNewJob(false)} created={(created, defaults) => { setSettings((current) => ({ ...(current || {}), jobDefaults: defaults })); setJob(created); setNewJob(false); navigate(`/jobs/${created.id}`); load(); }} />}
