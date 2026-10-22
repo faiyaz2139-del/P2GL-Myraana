@@ -6,6 +6,7 @@ import bcrypt
 from fastapi import HTTPException, Request
 from motor.motor_asyncio import AsyncIOMotorGridFSBucket
 
+from p2g.connector_auth import select_ready_connector, stale_connector_message
 from p2g.core import AppError, db, lock, new_id, now, unlock
 from p2g.pdfcheck import PdfError, inspect, make_print_ready, prepare, render_page, verify
 from p2g.present import reset_result, status_label
@@ -651,20 +652,31 @@ async def recover_interrupted_executions():
 
 
 async def readiness(job):
+    """Shop computer that can stage this file.
+
+    Paired devices are the same records the settings page marks Connected.
+    A writable folder is required only when a file-drop agent is configured
+    and no paired device has a fresh heartbeat.
+    """
     settings = await db.settings.find_one({"kind": "settings"}, {"_id": 0})
-    agent = await db.connector_state.find_one({"role": "agent"}, {"_id": 0})
     if not settings or not settings.get("printer"):
         raise AppError("No printer is selected. Verify a printer on the route step, then check again.")
     if not job.get("route") or job["route"]["settingsVersion"] != settings["version"]:
         raise AppError("Shop settings changed after the route was chosen. Choose the production route again.")
-    if not agent or not agent.get("writable"):
+    devices = await db.connector_devices.find({}, {"credential_hash": 0}).to_list(50)
+    agent = await db.connector_state.find_one({"role": "agent"}, {"_id": 0})
+    ready = select_ready_connector(devices, agent)
+    if ready:
+        return ready
+    stale = stale_connector_message(devices)
+    if stale:
+        raise AppError(stale)
+    if agent and str(agent.get("destination") or "").strip():
         raise AppError(
             "The shop computer is not connected. Start the connector with a writable folder, then check again. "
             "This step does not print."
         )
-    heartbeat = datetime.fromisoformat(agent["lastSeen"])
-    if datetime.now(timezone.utc) - heartbeat > timedelta(seconds=90):
-        raise AppError(
-            "The shop computer has not checked in for over a minute. Start the connector again, then check readiness."
-        )
-    return agent
+    raise AppError(
+        "The shop computer is not connected. Open MyraanaConnector. It runs in the tray, then check again. "
+        "This step does not print."
+    )

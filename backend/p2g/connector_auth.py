@@ -100,6 +100,144 @@ def _as_utc(value):
     return moment.astimezone(timezone.utc)
 
 
+def last_seen_phrase(last_seen, at=None):
+    """How long ago a heartbeat arrived, for the readiness notice."""
+    moment = _as_utc(at) or datetime.now(timezone.utc)
+    seen = _as_utc(last_seen)
+    if seen is None:
+        return ""
+    seconds = int((moment - seen).total_seconds())
+    if seconds < 0:
+        seconds = 0
+    if seconds < 60:
+        unit = "second" if seconds == 1 else "seconds"
+        return f"{seconds} {unit} ago"
+    minutes = seconds // 60
+    if minutes < 60:
+        unit = "minute" if minutes == 1 else "minutes"
+        return f"{minutes} {unit} ago"
+    hours = minutes // 60
+    unit = "hour" if hours == 1 else "hours"
+    return f"{hours} {unit} ago"
+
+
+def device_capabilities(device):
+    inventory = (device or {}).get("inventory") if isinstance(device, dict) else {}
+    raw = (inventory or {}).get("capabilities")
+    if raw is None and isinstance(device, dict):
+        raw = device.get("capabilities")
+    if isinstance(raw, str):
+        raw = [raw]
+    found = []
+    for item in raw or []:
+        text = str(item or "").strip().lower().replace("-", "_")
+        if text and text not in found:
+            found.append(text)
+    return found[:12]
+
+
+def normalise_capabilities(value):
+    return device_capabilities({"capabilities": value})
+
+
+def folder_agent_configured(agent):
+    """A file-drop agent exists only when it has a folder to write into."""
+    if not isinstance(agent, dict):
+        return False
+    return bool(str(agent.get("destination") or "").strip())
+
+
+def _device_id(device):
+    return str((device or {}).get("id") or (device or {}).get("_id") or "")
+
+
+def _device_hostname(device):
+    inventory = (device or {}).get("inventory") or {}
+    return str(inventory.get("hostname") or "").strip() or "The shop computer"
+
+
+def select_ready_connector(devices, agent=None, at=None):
+    """The connector that may stage a PRINT_READY file.
+
+    A paired device is ready when it is enabled and its heartbeat is under 90
+    seconds old. That is the same rule as Shop settings. A writable folder is
+    required only for a configured file-drop agent, and only when no paired
+    device is fresh. The Windows connector places the file on Fiery HOLD itself,
+    so a missing folder does not block it.
+    """
+    moment = _as_utc(at) or datetime.now(timezone.utc)
+    fresh = []
+    for device in devices or []:
+        if not isinstance(device, dict) or device.get("enabled") is False:
+            continue
+        if connector_presence(device.get("lastSeen"), True, moment) != "Connected":
+            continue
+        fresh.append(device)
+    fresh.sort(key=lambda device: str(device.get("lastSeen") or ""), reverse=True)
+    fiery = [device for device in fresh if "fiery_hold" in device_capabilities(device)]
+    chosen = (fiery or fresh or [None])[0]
+    if chosen:
+        capabilities = device_capabilities(chosen)
+        # A paired computer that has not reported a capability yet still stages
+        # to Fiery HOLD. Do not demand a writable folder for that path.
+        delivery = "folder" if capabilities == ["pdf_hot_folder"] else "fiery_hold"
+        if "fiery_hold" not in capabilities and delivery == "fiery_hold":
+            capabilities = capabilities + ["fiery_hold"]
+        return {
+            "kind": "device",
+            "id": _device_id(chosen),
+            "hostname": _device_hostname(chosen),
+            "lastSeen": chosen.get("lastSeen") or "",
+            "capabilities": capabilities,
+            "delivery": delivery,
+            "destination": "",
+            "writable": False,
+        }
+    if not folder_agent_configured(agent):
+        return None
+    fresh_agent = connector_presence(agent.get("lastSeen"), True, moment) == "Connected"
+    if fresh_agent and agent.get("writable"):
+        return {
+            "kind": "folder",
+            "id": "",
+            "hostname": "The shop computer",
+            "lastSeen": agent.get("lastSeen") or "",
+            "capabilities": ["pdf_hot_folder"],
+            "delivery": "folder",
+            "destination": str(agent.get("destination") or "").strip(),
+            "writable": True,
+        }
+    return None
+
+
+def stale_connector_message(devices, at=None):
+    """Name a paired computer whose heartbeat is older than 90 seconds."""
+    candidates = [
+        device for device in devices or []
+        if isinstance(device, dict) and device.get("enabled") is not False
+    ]
+    if not candidates:
+        return ""
+    moment = _as_utc(at) or datetime.now(timezone.utc)
+    candidates.sort(key=lambda device: str(device.get("lastSeen") or ""), reverse=True)
+    device = candidates[0]
+    if connector_presence(device.get("lastSeen"), True, moment) == "Connected":
+        return ""
+    host = _device_hostname(device)
+    phrase = last_seen_phrase(device.get("lastSeen"), moment)
+    when = f"Last seen {phrase}. " if phrase else "It has not checked in. "
+    return (
+        f"{host} is not connected. {when}"
+        f"Open MyraanaConnector on {host}. It runs in the tray. This step does not print."
+    )
+
+
+def hold_for_device(job, device_id):
+    """A hold with no device stays available. A named device only takes its own."""
+    owner = str(((job or {}).get("fieryHold") or {}).get("deviceId") or "")
+    return not owner or not device_id or owner == str(device_id)
+
+
 def connector_presence(last_seen, enabled=True, at=None):
     """Connected while a heartbeat is at most 90 seconds old. Otherwise Offline."""
     if not enabled:

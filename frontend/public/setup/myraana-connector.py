@@ -175,11 +175,16 @@ def discover_printers():
         return []
 
 
+def reported_capabilities():
+    """This program places PRINT_READY files on Fiery HOLD. It does not need a drop folder."""
+    return ["fiery_hold"]
+
+
 def inventory():
     found = discover_printers()
     fiery = [item for item in found if item.get("isFiery")]
     return {"hostname": socket.gethostname(), "printers": found,
-            "fiery_rip": fiery, "hot_folders": []}
+            "fiery_rip": fiery, "hot_folders": [], "capabilities": reported_capabilities()}
 
 
 def request(api_url, path, payload, credential=None):

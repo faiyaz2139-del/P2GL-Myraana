@@ -505,7 +505,7 @@ function JobView({ job, reload, back, settings, user, openSettings, onArchived }
     if (current === 9 && job.productionChecklist) return <LondonChecklist job={job} action={act} busy={busy} />;
     if (current === 9) return <RIPAction action={act} busy={busy} />;
     if (current === 10) return <div>
-      <p className="notice">The shop computer must be connected before this file can be staged. Start the connector, then check again. This step does not print.</p>
+      <p className="notice" data-testid="readiness-connector-notice">{readinessNotice(settings)}</p>
       <div className="action-row"><button className="primary" onClick={() => act("readiness")} disabled={busy} data-testid="check-readiness-button"><Link2 size={17} />Check shop readiness</button><button className="button" onClick={openSettings} data-testid="connect-shop-button">Connect shop</button></div>
     </div>;
     if (current === 11) return <HumanAction label="I authorize staging this exact approved PDF. This does not print it." buttonLabel="Authorize production" ack={ack} setAck={setAck} busy={busy} testId="authorize-production" onAction={() => act("authorize", { sha: proof?.sha, acknowledged: ack })} />;
@@ -1003,6 +1003,38 @@ function newestFoundPairing(pairings, now = Date.now()) {
   const found = (pairings || []).filter((item) => item.status === "Found" && pairingStillValid(item, now));
   found.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
   return found[0] || null;
+}
+
+function lastSeenAgo(value, now = Date.now()) {
+  const seen = Date.parse(value || "");
+  if (!Number.isFinite(seen)) return "";
+  const seconds = Math.max(0, Math.round((now - seen) / 1000));
+  if (seconds < 60) return `${seconds} ${seconds === 1 ? "second" : "seconds"} ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} ${minutes === 1 ? "minute" : "minutes"} ago`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} ${hours === 1 ? "hour" : "hours"} ago`;
+}
+
+function readinessDevice(settings) {
+  const devices = (settings?.pairedDevices || []).filter((item) => item && (item.inventory?.hostname || item.lastSeen));
+  const connected = devices.filter((item) => item.status === "Connected");
+  const pool = connected.length ? connected : devices;
+  return pool.slice().sort((a, b) => String(b.lastSeen || "").localeCompare(String(a.lastSeen || "")))[0] || null;
+}
+
+function readinessNotice(settings, now = Date.now()) {
+  const device = readinessDevice(settings);
+  if (!device) {
+    return "The shop computer must be connected before this file can be staged. Open MyraanaConnector. It runs in the tray. This step does not print.";
+  }
+  const host = device.inventory?.hostname || "The shop computer";
+  const ago = lastSeenAgo(device.lastSeen, now);
+  const when = ago ? `Last seen ${ago}.` : "It has not checked in.";
+  if (device.status === "Connected") {
+    return `${host} is connected. ${when} This step does not print.`;
+  }
+  return `${host} is not connected. ${when} Open MyraanaConnector on ${host}. It runs in the tray.`;
 }
 
 function connectorTrayHint(device) {
