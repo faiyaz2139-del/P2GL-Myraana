@@ -48,7 +48,8 @@ function LeadForm({ intentDefault }) {
   const [busy, setBusy] = useState(false);
   const submit = async (event) => {
     event.preventDefault();
-    const form = Object.fromEntries(new FormData(event.currentTarget));
+    const formNode = event.currentTarget;
+    const form = Object.fromEntries(new FormData(formNode));
     setBusy(true);
     setError("");
     setMessage("");
@@ -57,7 +58,7 @@ function LeadForm({ intentDefault }) {
         method: "POST",
         body: JSON.stringify({ ...form, intent }),
       });
-      event.currentTarget.reset();
+      formNode.reset();
       setMessage(intent === "demo"
         ? "Request saved. We will use this email to arrange a demo."
         : "Request saved. We will reply to this email about early access.");
@@ -150,15 +151,16 @@ export function Signup() {
   const [busy, setBusy] = useState(false);
   const submit = async (event) => {
     event.preventDefault();
+    const formNode = event.currentTarget;
     setBusy(true);
     setError("");
     setMessage("");
     try {
       const result = await api("public/signup", {
         method: "POST",
-        body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget))),
+        body: JSON.stringify(Object.fromEntries(new FormData(formNode))),
       });
-      event.currentTarget.reset();
+      formNode.reset();
       setMessage(result.message);
     } catch (reason) {
       setError(reason.message);
@@ -196,15 +198,16 @@ export function Contact() {
   const [busy, setBusy] = useState(false);
   const submit = async (event) => {
     event.preventDefault();
+    const formNode = event.currentTarget;
     setBusy(true);
     setError("");
     setMessage("");
     try {
       await api("public/leads", {
         method: "POST",
-        body: JSON.stringify({ ...Object.fromEntries(new FormData(event.currentTarget)), intent: "contact" }),
+        body: JSON.stringify({ ...Object.fromEntries(new FormData(formNode)), intent: "contact" }),
       });
-      event.currentTarget.reset();
+      formNode.reset();
       setMessage("Message saved. We will reply to the email you entered.");
     } catch (reason) {
       setError(reason.message);

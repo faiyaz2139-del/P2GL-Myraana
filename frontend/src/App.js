@@ -779,7 +779,7 @@ function Studio() {
     await load();
   };
   const nav = useMemo(() => [["jobs", "Jobs", FileText], ["recipes", "Recipes", Layers], ["settings", "Shop settings", Settings2]], []);
-  if (!auth) return <div className="auth-shell" data-testid="loading-screen"><p>Opening your shop…</p></div>;
+  if (!auth) return <div className="auth-shell" data-testid="loading-screen"><p>{error || "Opening your shop…"}</p></div>;
   if (!auth.user) {
     if (location.pathname !== "/login") return <Navigate to="/login" replace />;
     return <Auth auth={auth} onSignedIn={(user) => { setAuth({ user, needsSetup: false }); navigate("/jobs"); }} />;
