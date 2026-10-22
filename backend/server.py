@@ -1326,6 +1326,11 @@ async def job_action(job_id: str, request: Request):
             raise AppError("The Fiery checklist is already complete.")
         if not is_london_card(job.get("recipe") or {}):
             raise AppError("This job does not use the London business-card checklist.")
+        if (job.get("route") or {}).get("mode") != "production":
+            raise AppError(
+                "This job is a proof only, so the Fiery checklist is closed. Switch to the production route first.",
+                409,
+            )
         if not job.get("productionChecklist"):
             output = (job.get("cardRoute") or {}).get("outputName") or (print_ready or {}).get("name")
             job["productionChecklist"] = fresh_checklist(job["recipe"], output)

@@ -253,7 +253,10 @@ def test_stock_phrases_map_to_matte_and_finishes_use_the_shop_list():
     ]
     stocks = ["14pt matte", "16pt soft touch", "100lb Gloss Text"]
     assert match_finish("Matte", stocks) == "14pt matte"
-    assert match_finish("Glossy", stocks) == "100lb Gloss Text"
+    assert match_finish("Glossy", stocks) is None
+    assert match_finish("Glossy", stocks + ["14pt gloss"]) == "14pt gloss"
+    assert match_finish("Glossy", ["100lb Gloss Cover"]) == "100lb Gloss Cover"
+    assert match_finish("Glossy", ["Glossy cardstock"]) == "Glossy cardstock"
     assert match_finish("Soft touch", stocks) is None
     assert print_ready_name("card.pdf") == "card_PRINT_READY.pdf"
     assert print_ready_name("") == "artwork_PRINT_READY.pdf"
@@ -381,3 +384,46 @@ async def _seed():
         assert upgraded[0]["cutInstructions"] == "Edited by the shop"
         assert upgraded[0]["production"]["preset"] == "London BC"
         assert upgraded[0]["fileRules"]["neverSearch"] is True
+
+
+def _cmyk_card(width=3.5, height=2.0):
+    document = pymupdf.open()
+    page = document.new_page(width=width * PT, height=height * PT)
+    page.insert_text((0.6 * PT, 0.7 * PT), "Faiyaz Khan", fontsize=10)
+    document.update_stream(
+        page.get_contents()[0],
+        b"q 0.85 0.2 0 0.1 k 0 0 %.2f %.2f re f Q\n" % (width * PT, height * PT)
+        + document.xref_stream(page.get_contents()[0]),
+    )
+    data = document.tobytes()
+    document.close()
+    return data
+
+
+def test_cmyk_art_gets_a_cmyk_bleed_with_the_same_colour():
+    source = _cmyk_card()
+    result = assess_london_card(source, _recipe(), "card.pdf")
+    assert result["proceed"] is True and result["public"]["route"] == "extend"
+    produced = _opened(result["pdf"])
+    page = produced[0]
+    assert round(page.rect.width / PT, 3) == 3.75 and round(page.rect.height / PT, 3) == 2.25
+    assert [info["colorspace"] for info in page.get_image_info()] == [4]
+    pix = page.get_pixmap(dpi=72, colorspace=pymupdf.csCMYK, alpha=False)
+    corner = pix.pixel(1, 1)
+    inside = pix.pixel(pix.width // 2, pix.height - 15)
+    assert max(abs(a - b) for a, b in zip(corner, inside)) <= 2, (corner, inside)
+
+
+def test_rgb_art_keeps_an_rgb_bleed():
+    result = assess_london_card(_blue(3.5, 2), _recipe(), "card.pdf")
+    page = _opened(result["pdf"])[0]
+    assert [info["colorspace"] for info in page.get_image_info()] == [3]
+
+
+def test_proof_only_jobs_cannot_walk_the_fiery_checklist():
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[1] / "server.py").read_text(encoding="utf-8")
+    branch = text.split('elif action == "production-step":', 1)[1].split('elif action == "handoff":', 1)[0]
+    guard = branch.index('get("mode") != "production"')
+    assert guard < branch.index("apply_production_event(")
