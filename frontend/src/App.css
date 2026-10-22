@@ -36,3 +36,7 @@ img.brand-mark{width:40px;height:40px;border-radius:11px;background:transparent;
 .london-steps li{padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
 .london-steps li.done{opacity:.72}
 .london-steps li p{color:var(--muted);font-size:13px}
+.route-spinner{display:flex;align-items:center;gap:8px;margin:8px 0 12px;font-size:13px;color:var(--muted)}
+.route-spinner i{width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--blue);border-radius:50%;display:inline-block;animation:route-spin .8s linear infinite;flex-shrink:0}
+@keyframes route-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.route-spinner i{animation:none}}

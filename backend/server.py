@@ -31,6 +31,7 @@ from p2g.catalog_seed import SpecError
 from p2g.costing import CostValidationError, cost_profile
 from p2g.core import AppError, db, new_id, now
 from p2g.present import status_label
+from p2g.printer_discovery import normalise_reported, scan_is_due
 from p2g.printers import filter_printers, is_virtual_printer, printer_status
 from p2g.london_card import (
     WORKFLOW_NAME,
@@ -182,15 +183,40 @@ def valid_due(value):
     return value
 
 
+def connector_online(devices, agent):
+    if any((device or {}).get("status") == "Connected" for device in devices or []):
+        return True
+    return bool(agent and agent.get("writable"))
+
+
 def discovered_printers(settings_data, devices):
-    rows = []
     verified = settings_data.get("verifiedPrinters") or []
+    online = "Connected" if any((device or {}).get("status") == "Connected" for device in devices or []) else "Offline"
+    hostname = ""
+    stored = settings_data.get("discoveredPrinters")
+    if isinstance(stored, list):
+        source = stored
+    else:
+        source = []
+        for device in devices or []:
+            inventory = device.get("inventory") or {}
+            hostname = inventory.get("hostname") or hostname
+            source.extend(filter_printers(inventory.get("printers")))
+            if device.get("status") == "Connected":
+                online = "Connected"
     for device in devices or []:
-        inventory = device.get("inventory") or {}
-        for printer in filter_printers(inventory.get("printers")):
-            row = printer_status(printer, verified, device.get("status"))
-            row["device"] = inventory.get("hostname") or "Windows connector"
-            rows.append(row)
+        hostname = ((device.get("inventory") or {}).get("hostname")) or hostname
+    rows = []
+    for printer in normalise_reported(filter_printers(source)):
+        row = printer_status(printer, verified, online)
+        row.update({
+            "model": printer.get("model") or "",
+            "address": printer.get("address") or "",
+            "protocol": printer.get("protocol") or "",
+            "isFiery": bool(printer.get("isFiery")),
+            "device": hostname or "Shop connector",
+        })
+        rows.append(row)
     return rows
 
 
@@ -634,6 +660,8 @@ async def settings(request: Request):
         "connected": bool(agent and agent.get("writable")),
         "pairings": await pairings(),
         "pairedDevices": devices,
+        "connectorConnected": connector_online(devices, agent),
+        "scanPending": scan_is_due(settings_data),
         "discoveredPrinters": discovered_printers(settings_data, devices),
     }
 
@@ -690,6 +718,9 @@ async def update_settings(request: Request):
         "jobDefaults": current.get("jobDefaults"),
         "artworkRules": current.get("artworkRules"),
     }
+    for key in ("discoveredPrinters", "discoveredAt", "scanRequestedAt", "scanFulfilledAt"):
+        if key in current:
+            data[key] = current[key]
     changed = any(
         current.get(key) != data.get(key)
         for key in ("printer", "stocks", "sides", "instructions")
@@ -798,6 +829,35 @@ async def verify_printer(request: Request):
             )
             await save_job(job)
     return {"ok": True, "printer": printer, "verifiedPrinters": verified}
+
+
+@api.get("/printers/discovered")
+async def list_discovered_printers(request: Request):
+    require_user(await current_user(request))
+    settings_data = await shop_settings()
+    agent = await db.connector_state.find_one({"role": "agent"}, {"_id": 0})
+    devices = await paired_devices()
+    return {
+        "printers": discovered_printers(settings_data, devices),
+        "connectorConnected": connector_online(devices, agent),
+        "scanPending": scan_is_due(settings_data),
+    }
+
+
+@api.post("/printers/scan")
+async def request_printer_scan(request: Request):
+    assert_origin(request)
+    require_admin(await current_user(request))
+    stamp = now()
+    result = await db.settings.update_one(
+        {"kind": "settings"},
+        {"$set": {"scanRequestedAt": stamp}},
+    )
+    if not result.matched_count:
+        data = await shop_settings()
+        data["scanRequestedAt"] = stamp
+        await replace_settings(data)
+    return {"ok": True, "scan": True}
 
 
 @api.get("/cost-profiles")
