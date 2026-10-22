@@ -23,8 +23,8 @@ async def build_job_state(job):
     verification = job.get("verification") or {}
     approval = job.get("approval") or {}
     authorization = job.get("authorization") or {}
-    settings = await db.settings.find_one({"_id": "shop"}, {"_id": 0})
-    agent = await db.connector_state.find_one({"_id": "agent"}, {"_id": 0})
+    settings = await db.settings.find_one({"kind": "settings"}, {"_id": 0})
+    agent = await db.connector_state.find_one({"role": "agent"}, {"_id": 0})
     capabilities = await db.machine_capabilities.find(
         {"enabled": True, "stocks": job["stock"]},
         {"_id": 0},

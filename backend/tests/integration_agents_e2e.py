@@ -112,6 +112,7 @@ class IntegrationRun:
         client, db = await self.database()
         await db.cost_profiles.insert_one(
             {
+                "shop_id": "print2go",
                 "id": "zztest-cost-profile",
                 "name": "ZZTEST sample only",
                 "enabled": True,
@@ -128,6 +129,7 @@ class IntegrationRun:
         )
         await db.machine_capabilities.insert_one(
             {
+                "shop_id": "print2go",
                 "enabled": True,
                 "stocks": "14pt matte",
                 "plan_id": "zztest-12up",

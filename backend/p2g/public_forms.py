@@ -1,7 +1,7 @@
-"""Early-access leads and the signup scaffold.
+"""Early-access leads and the closed signup response.
 
-Signup does not create a shop. The database is one shared Print2Go workspace,
-so a second shop would see the same jobs.
+A shop workspace is created only when both signup flags are on. This helper
+always describes the request-only result.
 """
 import re
 
@@ -47,12 +47,12 @@ def lead_from_payload(payload, intent):
 
 
 def signup_result():
-    """Always refuse to open a workspace until tenant isolation exists."""
+    """Request-only response used while self-serve signup is turned off."""
     return {
         "ok": True,
         "workspace": False,
         "message": (
-            "Myraana saved your request. A separate shop workspace is not open yet, "
-            "because shops are not isolated from each other. We will set the shop up with you."
+            "Myraana saved your request. A separate shop workspace is not open yet. "
+            "We will set the shop up with you."
         ),
     }

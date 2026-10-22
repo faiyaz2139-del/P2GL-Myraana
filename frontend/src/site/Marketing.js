@@ -149,18 +149,30 @@ export function Signup() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [signupOpen, setSignupOpen] = useState(false);
+  useEffect(() => {
+    api("public/signup-status")
+      .then((result) => setSignupOpen(Boolean(result.signupOpen)))
+      .catch(() => setSignupOpen(false));
+  }, []);
   const submit = async (event) => {
     event.preventDefault();
     const formNode = event.currentTarget;
     setBusy(true);
     setError("");
     setMessage("");
+    const body = Object.fromEntries(new FormData(formNode));
+    if (!signupOpen) delete body.password;
     try {
       const result = await api("public/signup", {
         method: "POST",
-        body: JSON.stringify(Object.fromEntries(new FormData(formNode))),
+        body: JSON.stringify(body),
       });
       formNode.reset();
+      if (result.workspace) {
+        window.location.assign("/jobs");
+        return;
+      }
       setMessage(result.message);
     } catch (reason) {
       setError(reason.message);
@@ -173,18 +185,21 @@ export function Signup() {
     <main className="site-form">
       <form className="site-card" onSubmit={submit} data-testid="signup-form">
         <p className="site-kicker">SHOP SIGNUP</p>
-        <h1>Request a shop workspace.</h1>
-        <p>Myraana saves this request and does not open a separate shop. Shops are not isolated from each other yet, so a new login would see the same jobs. There is no password on this form.</p>
+        <h1>{signupOpen ? "Create your shop workspace." : "Request a shop workspace."}</h1>
+        <p>{signupOpen
+          ? "This creates a private shop, an administrator account, and the business card and flyer presets."
+          : "Myraana saves this request and does not open a shop. Self-serve signup is turned off, so this form does not create a login. There is no password on this form."}</p>
         {error && <p className="site-note" role="alert" data-testid="signup-error">{error}</p>}
         {message && <p className="site-ok" data-testid="signup-success">{message}</p>}
         <label>Shop name<input name="shop" required minLength="2" maxLength="120" data-testid="signup-shop-input" /></label>
         <div className="site-row">
-          <label>Your name<input name="name" maxLength="80" data-testid="signup-name-input" /></label>
+          <label>Your name<input name="name" maxLength="80" required={signupOpen} data-testid="signup-name-input" /></label>
           <label>Email<input name="email" type="email" required data-testid="signup-email-input" /></label>
         </div>
         <label>City<input name="city" maxLength="80" data-testid="signup-city-input" /></label>
         <label>What do you print?<textarea name="message" rows="4" maxLength="2000" data-testid="signup-message-input" /></label>
-        <button className="site-button solid" disabled={busy} data-testid="signup-submit-button">{busy ? "Saving…" : "Request a shop workspace"}</button>
+        {signupOpen && <label>Password<input name="password" type="password" required minLength="12" maxLength="200" autoComplete="new-password" data-testid="signup-password-input" placeholder="At least 12 characters" /></label>}
+        <button className="site-button solid" disabled={busy} data-testid="signup-submit-button">{busy ? "Saving…" : signupOpen ? "Create shop workspace" : "Request a shop workspace"}</button>
       </form>
     </main>
     <SiteFooter />
@@ -242,9 +257,9 @@ const LEGAL = {
     title: "Privacy",
     body: [
       "This draft describes how the Myraana studio at myraana.com handles information. It is not a finished privacy policy. A lawyer should replace it before the product is offered to other shops.",
-      "Shop staff accounts store a name, an email address, a password hash, and a role. Jobs store the customer name, product specs, due date, artwork files, proof approvals, and the production record. Early-access, demo, contact, and signup forms store the shop name, email, city, and message you submit. Those forms do not ask for or keep a password.",
+      "Shop staff accounts store a name, an email address, a password hash, a role, and the shop they belong to. Jobs store the customer name, product specs, due date, artwork files, proof approvals, and the production record. Early-access, demo, and contact forms store the shop name, email, city, and message you submit. They do not ask for a password. A signup request stores those same fields and does not keep a password. When self-serve signup is on, the password is used only to create that shop's account.",
       "Artwork files stay in the shop database so the proof can be tied to the file that was approved. Session cookies keep you signed in. The studio does not sell this information. Billing, if a shop turns it on later, would be handled by Stripe and is off unless the operator configures it.",
-      "Public marketing pages are separate from the Print2Go shop workspace. A signup request does not create an account.",
+      "Each shop sees only its own jobs, files, settings, and people. A signup request does not create an account while self-serve signup is turned off.",
     ],
   },
   terms: {

@@ -40,6 +40,25 @@ from p2g.products import (
     resolve_spec,
 )
 from p2g.public_forms import FormError, lead_from_payload, signup_result
+from p2g.shops import (
+    accept_invite,
+    create_invite,
+    provision_shop,
+    replace_settings,
+    save_connector_agent,
+)
+from p2g.tenancy import (
+    PRINT2GO_SHOP_ID,
+    TenantScopeError,
+    bound_shop,
+    clear_shop,
+    is_superadmin,
+    login_matches,
+    reset_shop,
+    shop_scope,
+    signup_is_open,
+    unscoped,
+)
 from p2g.uploads import classify_upload
 from p2g.pdfcheck import render_page
 from p2g.workflow import (
@@ -71,6 +90,23 @@ from p2g.workflow import (
 
 app = FastAPI(title="Myraana")
 api = APIRouter(prefix="/api")
+
+
+class ShopContextMiddleware:
+    """Clear shop scope around each request without buffering the body."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        tokens = clear_shop()
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            reset_shop(tokens)
 
 
 def error_response(error):
@@ -130,8 +166,11 @@ def discovered_printers(settings_data, devices):
 
 
 async def shop_settings():
-    settings = await db.settings.find_one({"_id": "shop"}, {"_id": 0})
+    settings = await db.settings.find_one({"kind": "settings"})
     if settings:
+        settings.pop("_id", None)
+        settings.pop("kind", None)
+        settings.pop("shop_id", None)
         settings.setdefault("shopName", "Print2Go")
         settings.setdefault("verifiedPrinters", [])
         settings.setdefault("jobDefaults", None)
@@ -167,7 +206,8 @@ async def build_info():
 @api.get("/auth")
 async def auth_status(request: Request):
     user = await current_user(request)
-    count = await db.users.count_documents({})
+    with unscoped():
+        count = await db.users.count_documents({})
     return {"user": user, "needsSetup": count == 0}
 
 
@@ -187,14 +227,21 @@ async def auth_setup(request: Request):
     )
     if not claim:
         raise AppError("An administrator is already configured.")
-    user = {"id": new_id(), "name": name, "email": email, "role": "admin"}
+    user = {
+        "id": new_id(),
+        "name": name,
+        "email": email,
+        "role": "admin",
+        "shop_id": PRINT2GO_SHOP_ID,
+    }
     try:
-        await db.users.insert_one({**user, "password": password_hash(password), "created": now()})
+        with shop_scope(PRINT2GO_SHOP_ID):
+            await db.users.insert_one({**user, "password": password_hash(password), "created": now()})
     except Exception as error:
         await db.bootstrap.update_one({"_id": "first-run"}, {"$set": {"configured": False}})
         raise AppError("Administrator setup could not be saved. Retry safely.") from error
     token, cookie, safe_user = session_response(request, user)
-    await create_session(token, user["id"])
+    await create_session(token, user["id"], user["shop_id"])
     response = JSONResponse({"user": safe_user})
     response.set_cookie(**cookie)
     return response
@@ -206,11 +253,24 @@ async def auth_login(request: Request):
     payload = await request.json()
     email = valid_text(payload.get("email"), "Email", 200).lower()
     password = str(payload.get("password") or "")
-    user = await db.users.find_one({"email": email})
+    shop_slug = str(payload.get("shop") or payload.get("shopSlug") or "").strip().lower()
+    with unscoped():
+        found = await db.users.find({"email": email}).to_list(20)
+    shop_id = None
+    if shop_slug:
+        shop = await db.shops.find_one({"slug": shop_slug})
+        shop_id = shop["_id"] if shop else None
+    matches = login_matches(found, shop_id, bool(shop_slug))
+    if len(matches) > 1:
+        raise AppError(
+            "This email is used by more than one shop. Enter the shop address.",
+            400,
+        )
+    user = matches[0] if matches else None
     if not user or not password_matches(password, user["password"]):
         raise AppError("Email or password is incorrect.", 401)
     token, cookie, safe_user = session_response(request, user)
-    await create_session(token, user["id"])
+    await create_session(token, user["id"], user.get("shop_id"))
     response = JSONResponse({"user": safe_user})
     response.set_cookie(**cookie)
     return response
@@ -223,7 +283,8 @@ async def auth_logout(request: Request):
     if raw:
         from p2g.core import sha256
 
-        await db.sessions.delete_one({"token_hash": sha256(raw)})
+        with unscoped():
+            await db.sessions.delete_one({"token_hash": sha256(raw)})
     response = JSONResponse({"ok": True})
     response.delete_cookie("p2g_session", path="/")
     return response
@@ -243,14 +304,109 @@ async def create_lead(request: Request):
     return await _store_lead(await request.json(), "early-access")
 
 
+@api.get("/public/signup-status")
+async def public_signup_status():
+    return {"signupOpen": signup_is_open()}
+
+
 @api.post("/public/signup")
 async def public_signup(request: Request):
-    """Record a shop request. Do not create a user or a second workspace."""
+    """Open a shop only when both signup flags are on. Otherwise store a lead."""
     assert_origin(request)
     payload = await request.json()
-    payload.pop("password", None)
-    await _store_lead(payload, "signup")
-    return signup_result()
+    if not signup_is_open():
+        payload.pop("password", None)
+        await _store_lead(payload, "signup")
+        return signup_result()
+    password = str(payload.pop("password", "") or "")
+    try:
+        lead = lead_from_payload(payload, payload.get("intent") or "signup")
+    except FormError as error:
+        raise AppError(error.message, 400) from error
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    if await db.leads.count_documents({"email": lead["email"], "created": {"$gt": cutoff}}) >= 8:
+        raise AppError("Too many requests for this email. Try again tomorrow.", 429)
+    user, shop = await provision_shop(lead["shop"], lead["email"], password, lead["name"])
+    await db.leads.insert_one({**lead, "id": new_id(), "created": now()})
+    token, cookie, safe_user = session_response(request, user)
+    await create_session(token, user["id"], user["shop_id"])
+    response = JSONResponse({
+        "ok": True,
+        "workspace": True,
+        "slug": shop["slug"],
+        "message": "Your shop workspace is ready.",
+        "user": safe_user,
+    })
+    response.set_cookie(**cookie)
+    return response
+
+
+def _platform_token_matches(supplied, expected):
+    if not supplied or not expected:
+        return False
+    supplied_bytes = supplied.encode()
+    expected_bytes = expected.encode()
+    if len(supplied_bytes) != len(expected_bytes):
+        return False
+    return hmac.compare_digest(supplied_bytes, expected_bytes)
+
+
+@api.post("/auth/platform-setup")
+async def platform_setup(request: Request):
+    """Create the one platform administrator. This is not a shop login."""
+    assert_origin(request)
+    expected = os.environ.get("PLATFORM_SETUP_TOKEN") or ""
+    if not expected:
+        raise AppError("Platform setup is not configured.", 503)
+    supplied = request.headers.get("x-platform-setup-token") or ""
+    if not _platform_token_matches(supplied, expected):
+        raise AppError("Platform setup token is incorrect.", 401)
+    payload = await request.json()
+    name = valid_text(payload.get("name"), "Name", 80)
+    email = valid_text(payload.get("email"), "Email", 200).lower()
+    password = str(payload.get("password") or "")
+    if "@" not in email or len(password) < 12 or len(password) > 200:
+        raise AppError("Use a valid email and a password of at least 12 characters.", 400)
+    with unscoped():
+        if await db.users.find_one({"role": "superadmin"}):
+            raise AppError("A platform administrator already exists.", 409)
+        if await db.users.find_one({"email": email}):
+            raise AppError("That email is already used.", 409)
+        user = {
+            "id": new_id(),
+            "name": name,
+            "email": email,
+            "role": "superadmin",
+            "shop_id": None,
+            "password": password_hash(password),
+            "created": now(),
+        }
+        await db.users.insert_one(user)
+    token, cookie, safe_user = session_response(request, user)
+    await create_session(token, user["id"], None)
+    response = JSONResponse({"user": safe_user})
+    response.set_cookie(**cookie)
+    return response
+
+
+@api.get("/platform/shops")
+async def platform_shops(request: Request):
+    user = await current_user(request)
+    if not is_superadmin(user):
+        raise AppError("Only a platform administrator can do that.", 403)
+    with unscoped():
+        rows = await db.shops.find({}).to_list(500)
+    return [
+        {
+            "id": row.get("_id"),
+            "name": row.get("name"),
+            "slug": row.get("slug"),
+            "created": row.get("created"),
+        }
+        for row in rows
+    ]
 
 
 async def _store_lead(payload, default_intent):
@@ -350,7 +506,7 @@ async def create_recipe(request: Request):
 async def settings(request: Request):
     require_user(await current_user(request))
     settings_data = await shop_settings()
-    agent = await db.connector_state.find_one({"_id": "agent"}, {"_id": 0})
+    agent = await db.connector_state.find_one({"role": "agent"}, {"_id": 0})
     devices = await paired_devices()
     return {
         **settings_data,
@@ -422,7 +578,7 @@ async def update_settings(request: Request):
         current.get(key) != data.get(key)
         for key in ("printer", "stocks", "sides", "instructions")
     )
-    await db.settings.replace_one({"_id": "shop"}, {"_id": "shop", **data}, upsert=True)
+    await replace_settings(data)
     if changed:
         affected = await db.jobs.find(
             {"state": "active", "tasks.12.status": {"$ne": "Completed"}},
@@ -459,9 +615,10 @@ async def save_artwork_rules(request: Request):
         raise AppError(error.message, 400) from error
     current = await shop_settings()
     await db.settings.update_one(
-        {"_id": "shop"},
+        {"kind": "settings"},
         {
             "$set": {
+                "kind": "settings",
                 "artworkRules": rules,
                 "shopName": current.get("shopName") or "Print2Go",
                 "printer": current.get("printer") or "",
@@ -493,9 +650,10 @@ async def verify_printer(request: Request):
     changed = printer != (current.get("printer") or "")
     version = int(current.get("version") or 1) + (1 if changed else 0)
     await db.settings.update_one(
-        {"_id": "shop"},
+        {"kind": "settings"},
         {
             "$set": {
+                "kind": "settings",
                 "printer": printer,
                 "verifiedPrinters": verified,
                 "stocks": current.get("stocks") or [],
@@ -557,7 +715,7 @@ async def create_user(request: Request):
     require_admin(await current_user(request))
     payload = await request.json()
     role = payload.get("role")
-    if role not in {"admin", "operator"}:
+    if role == "superadmin" or role not in {"admin", "operator"}:
         raise AppError("Choose administrator or operator.", 400)
     password = str(payload.get("password") or "")
     if len(password) < 12 or len(password) > 200:
@@ -570,11 +728,32 @@ async def create_user(request: Request):
         "password": password_hash(password),
         "created": now(),
     }
+    with unscoped():
+        if await db.users.find_one({"email": user["email"], "role": "superadmin"}):
+            raise AppError("That email cannot be used for a shop.", 409)
     try:
         await db.users.insert_one(user)
     except Exception as error:
-        raise AppError("That operator email already exists.", 409) from error
+        raise AppError("That email is already in this shop.", 409) from error
     return {"ok": True}
+
+
+@api.post("/invites")
+async def invite_operator(request: Request):
+    assert_origin(request)
+    user = require_admin(await current_user(request))
+    return await create_invite(user, await request.json())
+
+
+@api.post("/public/invites/accept")
+async def accept_operator_invite(request: Request):
+    assert_origin(request)
+    user = await accept_invite(await request.json())
+    token, cookie, safe_user = session_response(request, user)
+    await create_session(token, user["id"], user.get("shop_id"))
+    response = JSONResponse({"ok": True, "user": safe_user})
+    response.set_cookie(**cookie)
+    return response
 
 
 @api.get("/jobs")
@@ -635,7 +814,7 @@ async def create_job(request: Request):
     record_event(job, "Order created.", user["name"])
     await db.jobs.insert_one({"_id": job["id"], **job})
     await db.settings.update_one(
-        {"_id": "shop"},
+        {"kind": "settings"},
         {
             "$set": {
                 "jobDefaults": {
@@ -990,67 +1169,69 @@ async def connector_heartbeat(request: Request):
     supplied = request.headers.get("authorization", "").removeprefix("Bearer ")
     if not secret or not hmac.compare_digest(supplied, secret):
         raise AppError("Connector authentication failed.", 401)
-    payload = await request.json()
-    nonce = valid_text(payload.get("nonce"), "Connector nonce", 100)
-    try:
-        uuid.UUID(nonce)
-        timestamp = int(payload.get("timestamp"))
-    except (TypeError, ValueError, AttributeError) as error:
-        raise AppError("Connector nonce or timestamp is invalid.", 400) from error
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    if abs(now_ms - timestamp) > 60_000:
-        raise AppError("Connector clock differs by more than one minute.", 409)
-    try:
-        await db.connector_nonces.insert_one({"nonce": nonce, "created": datetime.now(timezone.utc)})
-    except Exception as error:
-        raise AppError("Connector replay rejected.", 409) from error
-    if not payload.get("writable") or "pdf-hot-folder" not in payload.get("capabilities", []):
-        raise AppError("Connector must report a writable PDF staging capability.", 409)
-    agent = {
-        "destination": valid_text(payload.get("destination"), "Destination", 500),
-        "writable": True,
-        "capabilities": ["pdf-hot-folder"],
-        "lastSeen": now(),
-    }
-    await db.connector_state.replace_one({"_id": "agent"}, {"_id": "agent", **agent}, upsert=True)
-    for handoff in payload.get("handoffs", []):
-        job_id = str(handoff.get("jobId") or "")
-        job = await get_job(job_id)
-        file = latest(job or {}, "PRINT_READY")
-        authorization = (job or {}).get("authorization")
-        matching = (
-            job
-            and file
-            and authorization
-            and handoff.get("sha") == file["sha"]
-            and handoff.get("fileId") == file["id"]
-            and handoff.get("generation") == job["generation"]
-            and authorization.get("generation") == job["generation"]
-        )
-        if not matching:
-            raise AppError("Connector handoff does not match an authorized file.", 409)
-        if not any(item["stage"] == "PRODUCTION_OUTPUT" and item.get("parent") == file["id"] for item in job["files"]):
-            staged = await create_file(
-                job,
-                "PRODUCTION_OUTPUT",
-                await file_bytes(job, file),
-                file,
-                "Connector confirmed exact checksum handoff; this is not proof of printing.",
+    shop_id = bound_shop(PRINT2GO_SHOP_ID, request.headers.get("x-shop-id"))
+    with shop_scope(shop_id):
+        payload = await request.json()
+        nonce = valid_text(payload.get("nonce"), "Connector nonce", 100)
+        try:
+            uuid.UUID(nonce)
+            timestamp = int(payload.get("timestamp"))
+        except (TypeError, ValueError, AttributeError) as error:
+            raise AppError("Connector nonce or timestamp is invalid.", 400) from error
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        if abs(now_ms - timestamp) > 60_000:
+            raise AppError("Connector clock differs by more than one minute.", 409)
+        try:
+            await db.connector_nonces.insert_one({"nonce": nonce, "created": datetime.now(timezone.utc)})
+        except Exception as error:
+            raise AppError("Connector replay rejected.", 409) from error
+        if not payload.get("writable") or "pdf-hot-folder" not in payload.get("capabilities", []):
+            raise AppError("Connector must report a writable PDF staging capability.", 409)
+        agent = {
+            "destination": valid_text(payload.get("destination"), "Destination", 500),
+            "writable": True,
+            "capabilities": ["pdf-hot-folder"],
+            "lastSeen": now(),
+        }
+        await save_connector_agent(agent)
+        for handoff in payload.get("handoffs", []):
+            job_id = str(handoff.get("jobId") or "")
+            job = await get_job(job_id)
+            file = latest(job or {}, "PRINT_READY")
+            authorization = (job or {}).get("authorization")
+            matching = (
+                job
+                and file
+                and authorization
+                and handoff.get("sha") == file["sha"]
+                and handoff.get("fileId") == file["id"]
+                and handoff.get("generation") == job["generation"]
+                and authorization.get("generation") == job["generation"]
             )
-            record_event(
-                job,
-                f"Connector confirmed production file handoff for checksum {staged['sha'][:12]}. "
-                "Physical printing still needs human confirmation.",
-            )
-            await save_job(job)
-    candidates = await db.jobs.find({"state": "active"}, {"_id": 0}).to_list(100)
-    authorized = []
-    for job in candidates:
-        file = latest(job, "PRINT_READY")
-        authorization = job.get("authorization")
-        if file and authorization and authorization["sha"] == file["sha"]:
-            authorized.append({"id": job["id"], "generation": job["generation"], "file": file})
-    return {"jobs": authorized}
+            if not matching:
+                raise AppError("Connector handoff does not match an authorized file.", 409)
+            if not any(item["stage"] == "PRODUCTION_OUTPUT" and item.get("parent") == file["id"] for item in job["files"]):
+                staged = await create_file(
+                    job,
+                    "PRODUCTION_OUTPUT",
+                    await file_bytes(job, file),
+                    file,
+                    "Connector confirmed exact checksum handoff; this is not proof of printing.",
+                )
+                record_event(
+                    job,
+                    f"Connector confirmed production file handoff for checksum {staged['sha'][:12]}. "
+                    "Physical printing still needs human confirmation.",
+                )
+                await save_job(job)
+        candidates = await db.jobs.find({"state": "active"}, {"_id": 0}).to_list(100)
+        authorized = []
+        for job in candidates:
+            file = latest(job, "PRINT_READY")
+            authorization = job.get("authorization")
+            if file and authorization and authorization["sha"] == file["sha"]:
+                authorized.append({"id": job["id"], "generation": job["generation"], "file": file})
+        return {"jobs": authorized}
 
 
 @api.get("/connector/file/{job_id}")
@@ -1059,14 +1240,18 @@ async def connector_file(job_id: str, request: Request):
     supplied = request.headers.get("authorization", "").removeprefix("Bearer ")
     if not secret or not hmac.compare_digest(supplied, secret):
         raise AppError("Connector authentication failed.", 401)
-    job = await get_job(job_id)
-    record = latest(job or {}, "PRINT_READY")
-    if not job or not record or job.get("authorization", {}).get("sha") != record["sha"]:
-        raise AppError("This file is not authorized.", 403)
-    return Response(await file_bytes(job, record), media_type="application/pdf")
+    shop_id = bound_shop(PRINT2GO_SHOP_ID, request.headers.get("x-shop-id"))
+    with shop_scope(shop_id):
+        job = await get_job(job_id)
+        record = latest(job or {}, "PRINT_READY")
+        if not job or not record or job.get("authorization", {}).get("sha") != record["sha"]:
+            raise AppError("This file is not authorized.", 403)
+        content = await file_bytes(job, record)
+    return Response(content, media_type="application/pdf")
 
 
 app.include_router(api)
+app.add_middleware(ShopContextMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -1079,3 +1264,8 @@ app.add_middleware(
 @app.exception_handler(AppError)
 async def app_error_handler(_: Request, error: AppError):
     return error_response(error)
+
+
+@app.exception_handler(TenantScopeError)
+async def tenant_scope_handler(_: Request, error: TenantScopeError):
+    return JSONResponse({"error": error.message, "code": error.code}, status_code=error.status)

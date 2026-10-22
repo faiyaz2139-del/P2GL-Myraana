@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from p2g.core import AppError, db, new_id, now
 from p2g.printers import filter_printers
+from p2g.tenancy import PRINT2GO_SHOP_ID, bound_shop, shop_scope, unscoped
 
 
 def _secret():
@@ -60,23 +61,25 @@ async def claim_pairing(payload):
     claim = str(payload.get("claimSecret") or "")
     if len(code) != 8 or len(claim) < 32 or len(claim) > 160:
         raise AppError("Pairing request is invalid.", 400)
-    pairing = await db.connector_pairings.find_one(
-        {"code_hash": _digest(code), "status": "Searching"}
-    )
-    if not pairing or pairing["expires_at"] <= now():
-        raise AppError("Pairing code is invalid or expired.", 409)
-    result = await db.connector_pairings.update_one(
-        {"_id": pairing["_id"], "status": "Searching"},
-        {"$set": {"status": "Found", "device_id": device_id, "claim_hash": _digest(claim),
-                  "inventory": _inventory(payload.get("inventory")), "claimed_at": now()}},
-    )
+    with unscoped():
+        pairing = await db.connector_pairings.find_one(
+            {"code_hash": _digest(code), "status": "Searching"}
+        )
+        if not pairing or pairing["expires_at"] <= now():
+            raise AppError("Pairing code is invalid or expired.", 409)
+        result = await db.connector_pairings.update_one(
+            {"_id": pairing["_id"], "status": "Searching"},
+            {"$set": {"status": "Found", "device_id": device_id, "claim_hash": _digest(claim),
+                      "inventory": _inventory(payload.get("inventory")), "claimed_at": now()}},
+        )
     if not result.modified_count:
         raise AppError("Pairing is no longer available.", 409)
     return {"id": pairing["_id"], "status": "Found"}
 
 
 async def pairing_status(pairing_id, claim):
-    pairing = await db.connector_pairings.find_one({"_id": pairing_id}, {"_id": 0})
+    with unscoped():
+        pairing = await db.connector_pairings.find_one({"_id": pairing_id})
     if not pairing or pairing["expires_at"] <= now():
         raise AppError("Pairing is invalid or expired.", 409)
     if not hmac.compare_digest(pairing.get("claim_hash", ""), _digest(claim)):
@@ -84,13 +87,14 @@ async def pairing_status(pairing_id, claim):
     if pairing["status"] != "Connected":
         return {"status": pairing["status"]}
     credential = secrets.token_urlsafe(48)
-    await db.connector_devices.update_one(
-        {"_id": pairing["device_id"]},
-        {"$set": {"credential_hash": _digest(credential), "enabled": True,
-                  "inventory": pairing["inventory"], "lastSeen": now(), "status": "Connecting"}},
-        upsert=True,
-    )
-    await db.connector_pairings.update_one({"_id": pairing_id}, {"$set": {"status": "Consumed"}})
+    with shop_scope(pairing.get("shop_id") or PRINT2GO_SHOP_ID):
+        await db.connector_devices.update_one(
+            {"_id": pairing["device_id"]},
+            {"$set": {"credential_hash": _digest(credential), "enabled": True,
+                      "inventory": pairing["inventory"], "lastSeen": now(), "status": "Connecting"}},
+            upsert=True,
+        )
+        await db.connector_pairings.update_one({"_id": pairing_id}, {"$set": {"status": "Consumed"}})
     return {"status": "Connected", "credential": credential}
 
 
@@ -133,11 +137,17 @@ async def devices():
 
 async def heartbeat(request, payload):
     credential = request.headers.get("authorization", "").removeprefix("Bearer ")
-    device = await db.connector_devices.find_one({"credential_hash": _digest(credential), "enabled": True})
+    requested = request.headers.get("x-shop-id")
+    with unscoped():
+        device = await db.connector_devices.find_one(
+            {"credential_hash": _digest(credential), "enabled": True}
+        )
     if not device:
         raise AppError("Connector authentication failed.", 401)
-    await db.connector_devices.update_one(
-        {"_id": device["_id"]},
-        {"$set": {"lastSeen": now(), "status": "Connected", "inventory": _inventory(payload.get("inventory"))}},
-    )
+    shop_id = bound_shop(device.get("shop_id"), requested)
+    with shop_scope(shop_id):
+        await db.connector_devices.update_one(
+            {"_id": device["_id"]},
+            {"$set": {"lastSeen": now(), "status": "Connected", "inventory": _inventory(payload.get("inventory"))}},
+        )
     return {"ok": True, "status": "Connected"}

@@ -9,6 +9,18 @@ from motor.motor_asyncio import AsyncIOMotorGridFSBucket
 from p2g.core import AppError, db, lock, new_id, now, unlock, sha256
 from p2g.pdfcheck import PdfError, inspect, make_print_ready, prepare, render_page, verify
 from p2g.present import status_label
+from p2g.tenancy import (
+    PRINT2GO_SHOP_ID,
+    current_shop_id,
+    download_allowed,
+    is_shop_admin,
+    is_superadmin,
+    migrate_tenants,
+    shop_scope,
+    starter_recipes,
+    unscoped,
+    activate_shop,
+)
 from p2g.uploads import SpecError, prepare_artwork
 
 
@@ -151,39 +163,37 @@ def public(doc):
 
 
 async def ensure_collections():
-    await db.users.create_index("email", unique=True)
-    await db.sessions.create_index("expires")
-    await db.connector_nonces.create_index("created", expireAfterSeconds=300)
-    await db.connector_nonces.create_index("nonce", unique=True)
-    await db.executions.create_index([("job_id", 1), ("status", 1)])
-    await db.executions.create_index("lease_until")
-    await db.cost_profiles.create_index("id", unique=True)
-    await db.leads.create_index("email")
-    await db.leads.create_index("created")
-    await db.bootstrap.update_one(
-        {"_id": "first-run"},
-        {"$setOnInsert": {"configured": False, "created": now()}},
-        upsert=True,
-    )
-    if not await db.recipes.find_one({"id": "business-card", "version": 1}):
-        recipe = {**DEFAULT_RECIPE, "created": now()}
-        await db.recipes.insert_one(recipe)
-    if not await db.recipes.find_one({"id": "flyer"}):
-        await db.recipes.insert_one(
-            {
-                "id": "flyer",
-                "product": "flyer",
-                "version": 1,
-                "name": "Flyer",
-                "width": 8.5,
-                "height": 11.0,
-                "bleed": 0.125,
-                "safe": 0.25,
-                "minDpi": 300,
-                "cutInstructions": "Cut to 8.5 × 11 in using the verified trim box. No fold.",
-                "created": now(),
-            }
+    with unscoped():
+        await migrate_tenants(db)
+        await db.users.create_index([("shop_id", 1), ("email", 1)], unique=True, name="shop_email")
+        await db.users.create_index("shop_id")
+        await db.sessions.create_index("expires")
+        await db.sessions.create_index("shop_id")
+        await db.jobs.create_index("shop_id")
+        await db.shops.create_index("slug", unique=True)
+        await db.connector_nonces.create_index("created", expireAfterSeconds=300)
+        await db.connector_nonces.create_index("nonce", unique=True)
+        await db.executions.create_index([("job_id", 1), ("status", 1)])
+        await db.executions.create_index("lease_until")
+        await db.cost_profiles.create_index(
+            [("shop_id", 1), ("id", 1)], unique=True, name="shop_cost"
         )
+        await db.leads.create_index("email")
+        await db.leads.create_index("created")
+        await db.invites.create_index("token_hash")
+        await db.bootstrap.update_one(
+            {"_id": "first-run"},
+            {"$setOnInsert": {"configured": False, "created": now()}},
+            upsert=True,
+        )
+    with shop_scope(PRINT2GO_SHOP_ID):
+        for recipe in starter_recipes():
+            if recipe["id"] == "business-card":
+                exists = await db.recipes.find_one({"id": "business-card", "version": 1})
+            else:
+                exists = await db.recipes.find_one({"id": recipe["id"]})
+            if not exists:
+                await db.recipes.insert_one({**recipe, "created": now()})
 
 
 def password_hash(password):
@@ -198,24 +208,33 @@ async def current_user(request: Request):
     raw = request.cookies.get("p2g_session")
     if not raw:
         return None
-    session = await db.sessions.find_one(
-        {"token_hash": sha256(raw), "expires": {"$gt": now()}},
-        {"_id": 0},
-    )
-    if not session:
-        return None
-    return await db.users.find_one({"id": session["user_id"]}, {"_id": 0, "password": 0})
+    with unscoped():
+        session = await db.sessions.find_one(
+            {"token_hash": sha256(raw), "expires": {"$gt": now()}},
+            {"_id": 0},
+        )
+        if not session:
+            return None
+        user = await db.users.find_one({"id": session["user_id"]}, {"_id": 0, "password": 0})
+    if user and user.get("shop_id"):
+        activate_shop(user["shop_id"])
+    return user
 
 
 def require_user(user):
     if not user:
         raise AppError("Sign in to your shop.", 401)
+    if is_superadmin(user) or not user.get("shop_id"):
+        raise AppError(
+            "Platform administrators do not open a shop workspace from this page.",
+            403,
+        )
     return user
 
 
 def require_admin(user):
     require_user(user)
-    if user["role"] != "admin":
+    if not is_shop_admin(user):
         raise AppError("Only an administrator can change shop configuration.", 403)
     return user
 
@@ -232,14 +251,22 @@ def session_response(request, user):
         "max_age": 43200,
         "path": "/",
     }
-    return token, cookie, {key: user[key] for key in ("id", "name", "email", "role")}
+    safe = {key: user[key] for key in ("id", "name", "email", "role")}
+    if user.get("shop_id"):
+        safe["shopId"] = user["shop_id"]
+    return token, cookie, safe
 
 
-async def create_session(token, user_id):
+async def create_session(token, user_id, shop_id=None):
     expiry = (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat()
-    await db.sessions.insert_one(
-        {"id": new_id(), "user_id": user_id, "token_hash": sha256(token), "expires": expiry}
-    )
+    record = {"id": new_id(), "user_id": user_id, "token_hash": sha256(token), "expires": expiry}
+    if shop_id:
+        with shop_scope(shop_id):
+            await db.sessions.insert_one(record)
+        return
+    with unscoped():
+        record["shop_id"] = None
+        await db.sessions.insert_one(record)
 
 
 async def create_file(job, stage, content, parent, method, name=None):
@@ -254,11 +281,14 @@ async def create_file(job, stage, content, parent, method, name=None):
         "parent": parent["id"] if parent else None,
         "method": method,
     }
-    bucket = AsyncIOMotorGridFSBucket(db, bucket_name="pdf_files")
+    shop_id = job.get("shop_id") or current_shop_id()
+    if shop_id and not job.get("shop_id"):
+        job["shop_id"] = shop_id
+    bucket = AsyncIOMotorGridFSBucket(db.raw, bucket_name="pdf_files")
     stream = bucket.open_upload_stream_with_id(
         file_id,
         meta["name"],
-        metadata={"job_id": job["id"], "sha": meta["sha"], "stage": stage},
+        metadata={"job_id": job["id"], "sha": meta["sha"], "stage": stage, "shop_id": shop_id},
     )
     await stream.write(content)
     await stream.close()
@@ -267,9 +297,16 @@ async def create_file(job, stage, content, parent, method, name=None):
 
 
 async def file_bytes(job, record):
-    bucket = AsyncIOMotorGridFSBucket(db, bucket_name="pdf_files")
-    stream = await bucket.open_download_stream(record["id"])
-    content = await stream.read()
+    stored = await db.raw["pdf_files.files"].find_one({"_id": record["id"]})
+    metadata_shop = ((stored or {}).get("metadata") or {}).get("shop_id")
+    if not download_allowed(current_shop_id(), (job or {}).get("shop_id"), metadata_shop):
+        raise AppError("File not found.", 404)
+    bucket = AsyncIOMotorGridFSBucket(db.raw, bucket_name="pdf_files")
+    try:
+        stream = await bucket.open_download_stream(record["id"])
+        content = await stream.read()
+    except Exception as error:
+        raise AppError("File not found.", 404) from error
     if hashlib.sha256(content).hexdigest() != record["sha"]:
         raise AppError("Saved file identity does not match its recorded checksum.", 409)
     return content
@@ -492,38 +529,40 @@ async def process_with_lease(job_id, generation, actor):
 
 
 async def recover_interrupted_executions():
-    expired = await db.executions.find(
-        {"status": {"$in": ["Queued", "Running"]}, "lease_until": {"$lt": now()}},
-    ).to_list(100)
+    with unscoped():
+        expired = await db.executions.find(
+            {"status": {"$in": ["Queued", "Running"]}, "lease_until": {"$lt": now()}},
+        ).to_list(100)
     for execution in expired:
-        await db.executions.update_one(
-            {"_id": execution["_id"]},
-            {"$set": {"status": "Interrupted", "updated": now()}},
-        )
-        job = await get_job(execution["job_id"])
-        if not job or job.get("state") != "active":
-            continue
-        for task in job["tasks"][2:7]:
-            if task["status"] == "Running":
-                update_task(
-                    job,
-                    job["tasks"].index(task),
-                    "Failed",
-                    "Execution was interrupted. Retry safely from saved evidence.",
-                    "Application",
-                    execution=execution["_id"],
-                    recovery="Retry checks. Completed files remain immutable.",
-                )
-        job.pop("activeExecution", None)
-        try:
-            await save_job(job)
-        except AppError:
-            continue
+        with shop_scope(execution.get("shop_id") or PRINT2GO_SHOP_ID):
+            await db.executions.update_one(
+                {"_id": execution["_id"]},
+                {"$set": {"status": "Interrupted", "updated": now()}},
+            )
+            job = await get_job(execution["job_id"])
+            if not job or job.get("state") != "active":
+                continue
+            for task in job["tasks"][2:7]:
+                if task["status"] == "Running":
+                    update_task(
+                        job,
+                        job["tasks"].index(task),
+                        "Failed",
+                        "Execution was interrupted. Retry safely from saved evidence.",
+                        "Application",
+                        execution=execution["_id"],
+                        recovery="Retry checks. Completed files remain immutable.",
+                    )
+            job.pop("activeExecution", None)
+            try:
+                await save_job(job)
+            except AppError:
+                continue
 
 
 async def readiness(job):
-    settings = await db.settings.find_one({"_id": "shop"}, {"_id": 0})
-    agent = await db.connector_state.find_one({"_id": "agent"}, {"_id": 0})
+    settings = await db.settings.find_one({"kind": "settings"}, {"_id": 0})
+    agent = await db.connector_state.find_one({"role": "agent"}, {"_id": 0})
     if not settings or not settings.get("printer"):
         raise AppError("Configure a printer in Shop settings.")
     if not job.get("route") or job["route"]["settingsVersion"] != settings["version"]:

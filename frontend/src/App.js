@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -73,6 +73,8 @@ function Badge({ status }) {
 }
 
 function Auth({ auth, onSignedIn }) {
+  const [params] = useSearchParams();
+  const invite = params.get("invite") || "";
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -82,14 +84,24 @@ function Auth({ auth, onSignedIn }) {
     setBusy(true);
     setError("");
     try {
-      const result = await api(`auth/${auth.needsSetup ? "setup" : "login"}`, {
-        method: "POST",
-        body: JSON.stringify({
-          name: form.get("name"),
-          email: form.get("email"),
-          password: form.get("password"),
-        }),
-      });
+      const result = invite
+        ? await api("public/invites/accept", {
+          method: "POST",
+          body: JSON.stringify({
+            token: invite,
+            name: form.get("name"),
+            password: form.get("password"),
+          }),
+        })
+        : await api(`auth/${auth.needsSetup ? "setup" : "login"}`, {
+          method: "POST",
+          body: JSON.stringify({
+            name: form.get("name"),
+            email: form.get("email"),
+            password: form.get("password"),
+            shop: form.get("shop") || "",
+          }),
+        });
       onSignedIn(result.user);
     } catch (reason) {
       setError(reason.message);
@@ -97,6 +109,13 @@ function Auth({ auth, onSignedIn }) {
       setBusy(false);
     }
   };
+
+  const heading = invite ? "Join your shop" : auth.needsSetup ? "Set up your shop" : "Welcome back";
+  const intro = invite
+    ? "Choose a password to accept this invite. It only joins the shop that sent it."
+    : auth.needsSetup
+      ? "Create the first administrator account."
+      : "Sign in to continue your production work.";
 
   return <div className="auth-shell" data-testid="auth-screen">
     <div className="auth-art">
@@ -112,27 +131,29 @@ function Auth({ auth, onSignedIn }) {
       <div className="mobile-brand"><Brand /></div>
       <p className="tiny">Myraana for Print2Go, London.</p>
       <span className="eyebrow">YOUR SHOP WORKSPACE</span>
-      <h2>{auth.needsSetup ? "Set up your shop" : "Welcome back"}</h2>
-      <p className="muted">{auth.needsSetup
-        ? "Create the first administrator account."
-        : "Sign in to continue your production work."}</p>
+      <h2>{heading}</h2>
+      <p className="muted">{intro}</p>
       {error && <div className="notice warning" role="alert" data-testid="auth-error">{error}</div>}
-      <form onSubmit={submit} data-testid="auth-form">
-        {auth.needsSetup && <label>Your name
+      <form onSubmit={submit} data-testid={invite ? "invite-accept-form" : "auth-form"}>
+        {(auth.needsSetup || invite) && <label>Your name
           <input name="name" required maxLength="80" autoComplete="name"
             data-testid="setup-name-input" placeholder="Shop administrator" />
         </label>}
-        <label>Email
+        {!invite && <label>Email
           <input name="email" required type="email" autoComplete="username"
             data-testid="auth-email-input" placeholder="you@yourshop.ca" />
-        </label>
+        </label>}
+        {!invite && !auth.needsSetup && <label>Shop address
+          <input name="shop" maxLength="80" autoComplete="off"
+            data-testid="auth-shop-input" placeholder="Only if this email is used by more than one shop" />
+        </label>}
         <label>Password
           <input name="password" required type="password" minLength="12" maxLength="200"
-            autoComplete={auth.needsSetup ? "new-password" : "current-password"}
+            autoComplete={auth.needsSetup || invite ? "new-password" : "current-password"}
             data-testid="auth-password-input" placeholder="At least 12 characters" />
         </label>
         <button className="primary wide" disabled={busy} data-testid="auth-submit-button">
-          {busy ? "Saving…" : auth.needsSetup ? "Create shop account" : "Sign in"}
+          {busy ? "Saving…" : invite ? "Join shop" : auth.needsSetup ? "Create shop account" : "Sign in"}
         </button>
       </form>
       <p className="tiny"><ShieldCheck size={14} />Files and approvals stay in your shop.</p>
@@ -695,19 +716,41 @@ function Settings({ settings, user, reload }) {
 
 function Operators() {
   const [message, setMessage] = useState("");
+  const [inviteMessage, setInviteMessage] = useState("");
+  const [inviteLink, setInviteLink] = useState("");
   const [busy, setBusy] = useState(false);
   const submit = async (event) => {
     event.preventDefault();
+    const formNode = event.currentTarget;
     setBusy(true);
     try {
       await api("users", {
         method: "POST",
-        body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget))),
+        body: JSON.stringify(Object.fromEntries(new FormData(formNode))),
       });
-      event.currentTarget.reset();
+      formNode.reset();
       setMessage("Operator account created.");
     } catch (reason) {
       setMessage(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const invite = async (event) => {
+    event.preventDefault();
+    const formNode = event.currentTarget;
+    setBusy(true);
+    setInviteLink("");
+    try {
+      const result = await api("invites", {
+        method: "POST",
+        body: JSON.stringify(Object.fromEntries(new FormData(formNode))),
+      });
+      formNode.reset();
+      setInviteLink(`${window.location.origin}/login?invite=${result.token}`);
+      setInviteMessage("Invite ready. Send this link. It expires in 7 days and only joins this shop.");
+    } catch (reason) {
+      setInviteMessage(reason.message);
     } finally {
       setBusy(false);
     }
@@ -724,6 +767,15 @@ function Operators() {
       <label>Permission<select name="role" defaultValue="operator" data-testid="operator-role-select"><option value="operator">Operator</option><option value="admin">Administrator</option></select></label>
       <button className="button" disabled={busy} data-testid="create-operator-button"><Users size={15} />Add operator</button>
     </form>
+    <form onSubmit={invite} data-testid="invite-form">
+      <label>Invite by email<input name="email" type="email" required data-testid="invite-email-input" /></label>
+      <label>Permission<select name="role" defaultValue="operator" data-testid="invite-role-select"><option value="operator">Operator</option><option value="admin">Administrator</option></select></label>
+      <button className="button" disabled={busy} data-testid="invite-operator-button">Create invite link</button>
+    </form>
+    {inviteMessage && <p className="notice" data-testid="invite-message">{inviteMessage}</p>}
+    {inviteLink && <label>Invite link
+      <input readOnly value={inviteLink} data-testid="invite-link" onFocus={(event) => event.target.select()} />
+    </label>}
   </section>;
 }
 
@@ -760,7 +812,7 @@ function Studio() {
     }
   };
   useEffect(() => { api("auth").then(setAuth).catch((reason) => setError(reason.message)); }, []);
-  useEffect(() => { if (auth?.user) load(); }, [auth?.user]);
+  useEffect(() => { if (auth?.user && auth.user.role !== "superadmin") load(); }, [auth?.user]);
   useEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
   useEffect(() => {
     if (!auth?.user || view !== "jobs") return undefined;
@@ -783,6 +835,15 @@ function Studio() {
   if (!auth.user) {
     if (location.pathname !== "/login") return <Navigate to="/login" replace />;
     return <Auth auth={auth} onSignedIn={(user) => { setAuth({ user, needsSetup: false }); navigate("/jobs"); }} />;
+  }
+  if (auth.user.role === "superadmin") {
+    return <div className="auth-shell" data-testid="platform-screen">
+      <main className="auth-form">
+        <h2>Platform administrator</h2>
+        <p className="muted">This sign-in is not a shop workspace. Shop jobs, files, and settings stay inside each shop.</p>
+        <button className="primary wide" data-testid="platform-sign-out-button" onClick={async () => { await api("auth/logout", { method: "POST", body: "{}" }); setAuth({ user: null, needsSetup: false }); navigate("/login"); }}>Sign out</button>
+      </main>
+    </div>;
   }
   if (location.pathname === "/login") return <Navigate to="/jobs" replace />;
   return <div className="app-shell" data-testid="studio-app">

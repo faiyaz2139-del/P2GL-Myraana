@@ -133,7 +133,7 @@ async def tool_result(name, job):
     if name == "get_artwork_verification":
         return {"inspection": job.get("inspection"), "verification": job.get("verification")}
     if name == "get_production_routes":
-        settings = await db.settings.find_one({"_id": "shop"}, {"_id": 0})
+        settings = await db.settings.find_one({"kind": "settings"}, {"_id": 0})
         return {
             "route": job.get("route"),
             "settings": settings,
