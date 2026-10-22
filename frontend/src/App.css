@@ -40,3 +40,14 @@ img.brand-mark{width:40px;height:40px;border-radius:11px;background:transparent;
 .route-spinner i{width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--blue);border-radius:50%;display:inline-block;animation:route-spin .8s linear infinite;flex-shrink:0}
 @keyframes route-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.route-spinner i{animation:none}}
+.queue-tabs{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 18px}
+.queue-tabs button{border:1px solid var(--line);background:var(--panel);color:var(--muted);border-radius:999px;padding:8px 14px;font-size:13px;font-weight:600}
+.queue-tabs button.selected{background:var(--blue-soft);color:var(--blue);border-color:transparent}
+.queue-tabs button span{margin-left:6px}
+.next-action.prominent{padding:28px 28px 24px}
+.next-action.prominent h2{font-size:28px}
+.finish-choice{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 4px}
+.history-details{border:1px solid var(--line);background:var(--panel);border-radius:9px;margin:20px 0;font-size:13px}
+.history-details>summary{padding:14px 16px;cursor:pointer;color:var(--muted);font-weight:600}
+.history-details:not([open]) > :not(summary){display:none}
+.history-details .tasks-section{margin:0;padding:0 16px 16px}

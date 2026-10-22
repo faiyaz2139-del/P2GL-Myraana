@@ -2,7 +2,8 @@
 
 The pairing code is created in one shop's settings and only joins that shop.
 This program does not use CONNECTOR_SECRET. It never prints, creates test pages,
-changes printer settings, or writes to hot folders. Build on Windows with the
+or changes printer settings. When Myraana asks, it can place a PRINT_READY file
+on a Fiery hold queue or in a Hold hot folder. Build on Windows with the
 adjacent PowerShell script.
 """
 import argparse
@@ -146,6 +147,62 @@ def request(api_url, path, payload, credential=None):
         return json.load(response)
 
 
+def request_bytes(api_url, path, credential):
+    headers = {"Authorization": f"Bearer {credential}"}
+    call = urllib.request.Request(api_url + path, headers=headers)
+    with urllib.request.urlopen(call, timeout=60) as response:
+        return response.read()
+
+
+def load_fiery_hold():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fiery_hold.py")
+    spec = importlib.util.spec_from_file_location("fiery_hold", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def perform_holds(api_url, credential, result, opener=None):
+    """Submit queued PRINT_READY files to HOLD. A failure is reported, never printed."""
+    holds = result.get("holds") if isinstance(result, dict) else None
+    if not holds:
+        return None
+    fiery = load_fiery_hold()
+    reports = []
+    for item in holds:
+        if not isinstance(item, dict) or not item.get("jobId"):
+            continue
+        try:
+            pdf = request_bytes(api_url, f"/connector-devices/holds/{item['jobId']}", credential)
+            outcome = fiery.submit_hold(
+                address=item.get("address") or "",
+                filename=item.get("filename") or "artwork_PRINT_READY.pdf",
+                preset=item.get("preset") or "London BC",
+                stock=item.get("stock") or "",
+                pdf=pdf,
+                opener=opener or fiery.fiery_opener,
+                hot_folder=item.get("hotFolder") or None,
+            )
+        except Exception:
+            outcome = {
+                "ok": False,
+                "held": False,
+                "printed": False,
+                "method": "api",
+                "error": "The hold could not be submitted.",
+            }
+        if outcome.get("printed") or outcome.get("release") or outcome.get("released"):
+            outcome = {
+                "ok": False,
+                "held": False,
+                "printed": False,
+                "method": "api",
+                "error": "Refused a print or release. The job stays on HOLD.",
+            }
+        reports.append({"jobId": item["jobId"], **outcome})
+    return reports or None
+
+
 def website_url(value):
     value = value.strip().rstrip("/")
     parsed = urllib.parse.urlsplit(value)
@@ -186,9 +243,14 @@ def run(url=None, code=None, report=print, stop=None):
                 report(f"Connected. {len(found.get('printers') or [])} printer(s) found.")
                 if isinstance(result, dict) and result.get("scan"):
                     found = inventory()
-                    request(api_url, "/connector-devices/heartbeat",
+                    result = request(api_url, "/connector-devices/heartbeat",
                             {"inventory": found, "scanned": True}, credential)
                     report("Scanned again for printers.")
+                reports = perform_holds(api_url, credential, result)
+                if reports:
+                    request(api_url, "/connector-devices/heartbeat",
+                            {"inventory": found, "holds": reports}, credential)
+                    report("Sent the PRINT_READY file to the Fiery hold queue. It was not printed.")
             else:
                 if not state.get("pairingId"):
                     if not code:

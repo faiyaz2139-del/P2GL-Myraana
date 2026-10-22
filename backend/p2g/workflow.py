@@ -23,6 +23,7 @@ from p2g.tenancy import (
     unscoped,
 )
 from p2g.uploads import SpecError, prepare_artwork
+from p2g.card_flow import AUTO_ACTOR, auto_bleed, queue_bucket, specs_known
 from p2g.london_card import assess_london_card, is_london_card, print_ready_name, seed_london_card_shops
 
 
@@ -159,6 +160,7 @@ def reset_from(job, index, reason):
     if index <= 8:
         job.pop("route", None)
         job.pop("readiness", None)
+        job.pop("fieryHold", None)
     if index <= 6:
         job.pop("verification", None)
     if index <= 3:
@@ -185,6 +187,10 @@ async def ensure_collections():
         await db.sessions.create_index("expires")
         await db.sessions.create_index("shop_id")
         await db.jobs.create_index("shop_id")
+        await db.jobs.create_index(
+            [("shop_id", 1), ("queue", 1), ("updated", -1), ("_id", -1)],
+            name="shop_queue_updated",
+        )
         await db.shops.create_index("slug", unique=True)
         await db.connector_nonces.create_index("created", expireAfterSeconds=300)
         await db.connector_nonces.create_index("nonce", unique=True)
@@ -329,6 +335,7 @@ async def file_bytes(job, record):
 
 
 async def save_job(job, token=None):
+    job["queue"] = queue_bucket(job)
     job["updated"] = now()
     data = {key: value for key, value in job.items() if key not in {"revision", "_id"}}
     query = {"_id": job["id"], "revision": job["revision"]}
@@ -349,6 +356,8 @@ async def get_job(job_id):
 
 
 async def run_pdf_workflow(job, actor, execution=None, token=None):
+    """Preflight, London routing, PRINT_READY, and the proof. History is Myraana (auto)."""
+    actor = AUTO_ACTOR
     if job.get("state") != "active":
         raise AppError(f"This job is {job.get('state')}. Resume it before processing.")
 
@@ -368,6 +377,18 @@ async def run_pdf_workflow(job, actor, execution=None, token=None):
             )
         except SpecError as error:
             update_task(job, 2, "Blocked", str(error), actor, original["id"])
+            await persist()
+            return job
+        if not specs_known(job):
+            update_task(
+                job,
+                2,
+                "Needs attention",
+                "Size, stock, or quantity is missing, so automatic checks are paused.",
+                actor,
+                original["id"],
+                execution=execution,
+            )
             await persist()
             return job
         london_name = None
@@ -399,7 +420,7 @@ async def run_pdf_workflow(job, actor, execution=None, token=None):
                 decision = "blank-border" if assessed["public"]["route"] == "extend" else "bleed-present"
                 job["bleedDecision"] = decision
                 job["bleedConfirmation"] = {
-                    "actor_name": actor,
+                    "actor_name": AUTO_ACTOR,
                     "at": now(),
                     "generation": job["generation"],
                     "original_file_id": original["id"],
@@ -439,17 +460,20 @@ async def run_pdf_workflow(job, actor, execution=None, token=None):
                 )
                 await persist()
                 return job
-            if not job.get("bleedConfirmation"):
+            confirmation = auto_bleed(job, original["id"], now())
+            if confirmation is None:
                 update_task(
                     job,
                     3,
-                    "Waiting for operator",
-                    "Confirm bleed handling before the print-ready file is prepared.",
+                    "Needs attention",
+                    "Bleed handling is not confirmed, so automatic preparation is paused.",
                     actor,
                     original["id"],
                 )
                 await persist()
                 return job
+            job["bleedDecision"] = confirmation.get("decision") or job.get("bleedDecision") or "bleed-present"
+            job["bleedConfirmation"] = confirmation
             update_task(job, 3, "Completed", "Bleed handling confirmed.", actor, original["id"])
         if job["tasks"][4]["status"] != "Completed":
             update_task(job, 4, "Running", "Preparing the protected working copy.", actor, execution=execution)
@@ -510,7 +534,13 @@ async def run_pdf_workflow(job, actor, execution=None, token=None):
                 actor,
                 print_ready["id"],
             )
-            update_task(job, 7, "Waiting for approval", "Review the actual production proof.", actor)
+            update_task(
+                job,
+                7,
+                "Waiting for approval",
+                "Proof is ready to send. Check it, then approve this exact file.",
+                actor,
+            )
         for task in job["tasks"][2:7]:
             if task["status"] == "Completed" and execution and execution not in task["executions"]:
                 task["executions"].append(execution)

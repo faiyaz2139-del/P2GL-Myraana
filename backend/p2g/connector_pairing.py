@@ -3,11 +3,15 @@ import os
 import secrets
 from datetime import datetime, timedelta, timezone
 
+from p2g.account_access import exclude_archived
+from p2g.card_flow import AUTO_ACTOR, hold_failure_message, record_successful_hold
 from p2g.connector_auth import credential_hash, legacy_credential_hash
 from p2g.core import AppError, db, new_id, now
+from p2g.fiery_hold import interpret_hold_report
 from p2g.printer_discovery import normalise_reported, scan_is_due
 from p2g.printers import filter_printers
 from p2g.tenancy import PRINT2GO_SHOP_ID, bound_shop, shop_scope, unscoped
+from p2g.workflow import file_bytes, get_job, latest, record_event, save_job, update_task
 
 
 def _valid_id(value):
@@ -127,7 +131,7 @@ async def devices():
     return records
 
 
-async def heartbeat(request, payload):
+async def _device_for(request):
     credential = request.headers.get("authorization", "").removeprefix("Bearer ")
     requested = request.headers.get("x-shop-id")
     plain = credential_hash(credential)
@@ -146,7 +150,86 @@ async def heartbeat(request, payload):
     if not device:
         raise AppError("Connector authentication failed.", 401)
     owner = device.get("shop_id") or PRINT2GO_SHOP_ID
-    shop_id = bound_shop(owner, requested)
+    return device, bound_shop(owner, requested)
+
+
+async def _record_holds(reports, settings):
+    if not isinstance(reports, list):
+        return
+    stocks = (settings or {}).get("stocks") or []
+    for report in reports[:8]:
+        if not isinstance(report, dict):
+            continue
+        job = await get_job(str(report.get("jobId") or ""))
+        if not job or (job.get("fieryHold") or {}).get("status") not in {"queued", "held"}:
+            continue
+        interpreted = interpret_hold_report(report)
+        hold = dict(job.get("fieryHold") or {})
+        if interpreted["ok"]:
+            hold.update(
+                {
+                    "status": "held",
+                    "held": True,
+                    "printed": False,
+                    "method": interpreted["method"],
+                    "error": "",
+                }
+            )
+            job["fieryHold"] = hold
+            outcome = record_successful_hold(job, stocks)
+            if outcome.get("stop"):
+                job["productionStop"] = outcome["stop"]
+                update_task(job, 9, "Needs attention", f"{outcome['stop']} Nothing was printed.", AUTO_ACTOR)
+            else:
+                job.pop("productionStop", None)
+                pending = next((step for step in job.get("productionChecklist") or [] if step.get("status") != "done"), None)
+                title = pending["title"] if pending else "Load Duplo DC-618 job no. 2."
+                update_task(job, 9, "Waiting for operator", title, AUTO_ACTOR)
+            record_event(job, "PRINT_READY is on the Fiery hold queue. It was not printed.", AUTO_ACTOR)
+        else:
+            hold.update({"status": "failed", "held": False, "printed": False, "error": interpreted["error"]})
+            job["fieryHold"] = hold
+            message = hold_failure_message(interpreted["error"])
+            job["productionStop"] = message
+            if job["tasks"][8]["status"] != "Completed":
+                update_task(job, 8, "Needs attention", message, AUTO_ACTOR)
+            else:
+                update_task(job, 9, "Needs attention", message, AUTO_ACTOR)
+        await save_job(job)
+
+
+async def _pending_holds(settings, inventory):
+    if (settings or {}).get("fieryAutoSend") is not True:
+        return []
+    fiery = next((item for item in inventory.get("printers") or [] if item.get("isFiery") and item.get("name")), None)
+    if not fiery:
+        return []
+    folders = inventory.get("hot_folders") or []
+    hot = ""
+    if folders and isinstance(folders[0], dict):
+        hot = str(folders[0].get("path") or "")[:300]
+    queued = await db.jobs.find(
+        exclude_archived({"state": "active", "fieryHold.status": "queued"}),
+        {"_id": 0, "id": 1, "cardRoute": 1, "finish": 1, "stock": 1},
+    ).to_list(5)
+    outgoing = []
+    for job in queued:
+        name = (job.get("cardRoute") or {}).get("outputName") or "artwork_PRINT_READY.pdf"
+        outgoing.append(
+            {
+                "jobId": job.get("id"),
+                "filename": name,
+                "preset": "London BC",
+                "stock": job.get("finish") or job.get("stock") or "",
+                "address": fiery.get("address") or "",
+                "hotFolder": hot,
+            }
+        )
+    return outgoing
+
+
+async def heartbeat(request, payload):
+    device, shop_id = await _device_for(request)
     inventory = _inventory(payload.get("inventory"))
     inventory["printers"] = normalise_reported(inventory.get("printers"))
     scanned = payload.get("scanned") is True
@@ -162,4 +245,23 @@ async def heartbeat(request, payload):
             if scanned:
                 fields["scanFulfilledAt"] = now()
             await db.settings.update_one({"_id": settings["_id"]}, {"$set": fields})
-    return {"ok": True, "status": "Connected", "scan": due}
+            if fields.get("discoveredPrinters") is not None:
+                settings = {**settings, **fields}
+        await _record_holds(payload.get("holds"), settings)
+        holds = await _pending_holds(settings, inventory)
+    return {"ok": True, "status": "Connected", "scan": due, "holds": holds}
+
+
+async def hold_pdf(request, job_id):
+    """PRINT_READY bytes for a queued hold. The connector submits them. This does not print."""
+    _device, shop_id = await _device_for(request)
+    with shop_scope(shop_id):
+        job = await get_job(job_id)
+        if not job or (job.get("fieryHold") or {}).get("status") not in {"queued", "held"}:
+            raise AppError("Hold file not found.", 404)
+        record = latest(job, "PRINT_READY")
+        if not record:
+            raise AppError("Hold file not found.", 404)
+        content = await file_bytes(job, record)
+        name = str(record.get("name") or "artwork_PRINT_READY.pdf").replace('"', "").replace("\\", "")
+        return content, name

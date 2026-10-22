@@ -47,6 +47,21 @@ function reviewHeadline(results) {
   return { title: "Not production-ready", detail: stopped.summary || "Review stopped." };
 }
 
+function knownFinish(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (text === "matte" || text === "matt" || text === "matte cardstock") return "Matte";
+  if (text === "glossy" || text === "gloss" || text === "gloss cardstock") return "Glossy";
+  return "";
+}
+
+const QUEUE_GROUPS = [
+  ["needs-you", "Needs you"],
+  ["waiting-customer", "Waiting on customer"],
+  ["ready-to-print", "Ready to print"],
+  ["printing-cutting", "Printing/cutting"],
+  ["done", "Done"],
+];
+
 function displayStatus(job, task) {
   if (job.state === "paused") return "Paused";
   if (job.state === "complete") return "Completed";
@@ -339,6 +354,8 @@ function JobView({ job, reload, back, settings, user, openSettings, onArchived }
   const [ack, setAck] = useState(false);
   const [uploadAck, setUploadAck] = useState(false);
   const [agentReview, setAgentReview] = useState(null);
+  const [proofFinish, setProofFinish] = useState(knownFinish(job.finish));
+  useEffect(() => { setProofFinish(knownFinish(job.finish)); }, [job.id, job.finish]);
   const current = job.tasks.findIndex((task) => task.status !== "Completed");
   const task = job.tasks[current] || job.tasks[job.tasks.length - 1];
   const visualStatus = displayStatus(job, task);
@@ -459,12 +476,29 @@ function JobView({ job, reload, back, settings, user, openSettings, onArchived }
     </div>;
     if (current === 3 && !job.bleedConfirmation) return <HumanAction label="I confirm the bleed and safe area on this file." buttonLabel="Confirm bleed handling" ack={ack} setAck={setAck} busy={busy} testId="confirm-bleed" onAction={() => act("confirm-bleed", { acknowledged: ack })} />;
     if (current === 3) return <button className="primary" onClick={process} disabled={busy} data-testid="process-artwork-button"><ShieldCheck size={17} />{busy ? "Checking…" : "Prepare print-ready file"}</button>;
-    if (current === 7) return <HumanAction label="I reviewed the actual proof, margins, and all notes." buttonLabel="Approve proof" ack={ack} setAck={setAck} busy={busy} testId="approve-proof" onAction={() => act("approve", { sha: proof?.sha, acknowledged: ack })} />;
+    if (current === 7) {
+      const card = job.product === "business-card" || job.spec?.product === "business-card" || job.recipe?.production?.preset === "London BC";
+      if (!card) return <HumanAction label="I reviewed the actual proof, margins, and all notes." buttonLabel="Approve proof" ack={ack} setAck={setAck} busy={busy} testId="approve-proof" onAction={() => act("approve", { sha: proof?.sha, acknowledged: ack })} />;
+      const coating = knownFinish(job.finish) || proofFinish;
+      return <div data-testid="proof-approval">
+        {knownFinish(job.finish)
+          ? <p data-testid="proof-finish-known">Finish is {knownFinish(job.finish)}. The Fiery stock step will use it.</p>
+          : <div data-testid="proof-finish-choice">
+            <p>Confirm Matte or Glossy. This answers the Fiery stock step.</p>
+            <div className="finish-choice">
+              <button type="button" className={proofFinish === "Matte" ? "primary" : "button"} data-testid="proof-finish-matte" onClick={() => setProofFinish("Matte")}>Matte</button>
+              <button type="button" className={proofFinish === "Glossy" ? "primary" : "button"} data-testid="proof-finish-glossy" onClick={() => setProofFinish("Glossy")}>Glossy</button>
+            </div>
+          </div>}
+        <HumanAction label="I reviewed the actual proof, margins, and all notes." buttonLabel="Approve proof" ack={ack} setAck={setAck} busy={busy || !coating} testId="approve-proof" onAction={() => act("approve", { sha: proof?.sha, acknowledged: ack, finish: coating })} />
+      </div>;
+    }
     if (current === 8) return <RouteAction job={job} settings={settings} user={user} act={act} busy={busy} error={error} errorCode={errorCode} openSettings={openSettings} />;
     if (current === 9 && job.route?.mode === "proof-only") return <div>
       <p className="notice" data-testid="proof-only-stop">This job is a proof only, so it does not go to a press. Switch to production here if it should be printed.</p>
       <button className="primary" onClick={() => act("route", { mode: "production" })} disabled={busy} data-testid="switch-production-route-button">Switch to production route</button>
     </div>;
+    if (current === 9 && job.fieryHold?.status === "queued") return <p className="notice" data-testid="fiery-hold-pending">Sending the PRINT_READY file to the Fiery hold queue. It stays on HOLD and will not print.</p>;
     if (current === 9 && job.productionChecklist) return <LondonChecklist job={job} action={act} busy={busy} />;
     if (current === 9) return <RIPAction action={act} busy={busy} />;
     if (current === 10) return <div>
@@ -516,12 +550,11 @@ function JobView({ job, reload, back, settings, user, openSettings, onArchived }
       <div className="job-heading"><div><span className="eyebrow">{(job.spec?.productName || job.recipe?.name || "PRINT").toUpperCase()} · RECIPE V{job.recipe.version}</span><h1 data-testid="job-customer-title">{job.customer}</h1><p>{productLine(job)} · Due {job.due}</p></div><Badge status={visualStatus} /></div>
       <div className="summary-strip"><div><span>Finished size</span><strong>{job.spec ? `${trimNumber(job.spec.width)} × ${trimNumber(job.spec.height)} ${job.spec.unit}` : `${job.recipe.width} × ${job.recipe.height} in`}</strong></div><div><span>Stock</span><strong>{job.stock}</strong></div><div><span>Finish</span><strong>{job.finish}</strong></div><div><span>Progress</span><strong>{job.tasks.filter((item) => item.status === "Completed").length} of 16 steps</strong></div></div>
       <div className="progress-line" data-testid="job-progress">{job.tasks.map((item) => <div key={item.id} className={item.status === "Completed" ? "done" : item.status === "Running" ? "running" : ""} />)}</div>
-      <section className="next-action" data-testid="production-review-panel"><div className="next-label"><span className="eyebrow">PRODUCTION REVIEW</span><span>{settings?.aiConnected ? "AI-assisted" : "Rule-based review"}</span></div><h2>Run AI Production Review</h2><p>Reviews saved job evidence only. It cannot approve, complete workflow steps, or print.</p><button className="button" onClick={runAgentReview} disabled={busy} data-testid="run-production-review-button"><ShieldCheck size={17} />{busy ? "Reviewing…" : "Run AI Production Review"}</button>{agentReview && <div className="inspection-details" data-testid="production-review-results"><div className="section-heading"><div><h3 data-testid="production-review-headline">{(agentReview.headline || reviewHeadline(agentReview.results)).title}</h3><p data-testid="production-review-detail">{(agentReview.headline || reviewHeadline(agentReview.results)).detail}</p></div><span>{settings?.aiConnected ? "AI-assisted" : "Rule-based review"}</span></div>{(agentReview.results || []).map((item) => <div className="inspection-note" key={`${agentReview.execution}-${item.agent}`}><strong>{item.agent} · {item.status}</strong><p>{item.summary}</p>{item.stop_reasons?.length > 0 && <p>Next: {item.stop_reasons.join(" ")}</p>}{item.warnings?.length > 0 && <p>Next: {item.warnings.join(" ")}</p>}{item.data?.selected_plan?.cost_estimate && <p data-testid="cost-estimate-summary">Cost {item.data.selected_plan.cost_estimate.total} · Margin {item.data.selected_plan.cost_estimate.profit_margin_percent ?? "unavailable"}%</p>}{item.data?.money_cost === "UNKNOWN" && <p data-testid="cost-inputs-missing">Cost inputs are unavailable; no cheapest route is claimed.</p>}</div>)}</div>}</section>
       {job.cardRoute && <p className={`notice${job.cardRoute.stop ? " warning" : ""}`} data-testid="card-route"><StepKind kind={job.cardRoute.kind} /> {job.cardRoute.message}</p>}
-      <section className="next-action" data-testid="next-action-panel"><div className="next-label"><span className="eyebrow">YOUR NEXT STEP</span><span>Step {current + 1} of 16</span></div><h2>{task.title}</h2><p>{task.result}</p>{actionPanel()}</section>
+      <section className="next-action prominent" data-testid="next-action-panel"><div className="next-label"><span className="eyebrow">YOUR NEXT STEP</span><span>Step {Math.max(current, 0) + 1} of 16</span></div><h2>{current === 7 ? "Check the proof" : task.title}</h2><p>{task.result}</p>{actionPanel()}</section>
       {proof && <section className="proof-section" data-testid="production-proof-section"><div className="section-heading"><h3>Production proof</h3><a className="text-button" href={`${API}/files/${job.id}/${proof.id}?download`} data-testid="download-print-ready-link"><Download size={15} />Download PDF</a></div><div className="proof-holder"><div className="proof-pages">{Array.from({ length: job.sides }).map((_, index) => <div className="proof-page" key={index}><p>{index ? "Back" : "Front"}</p><img src={`${API}/files/${job.id}/${proof.id}/preview/${index + 1}`} alt={`Proof page ${index + 1}`} data-testid={`proof-page-${index + 1}`} /></div>)}</div></div><div className="file-identity"><ShieldCheck size={15} /><span>Actual generated production file<small data-testid="print-ready-sha">SHA-256 {proof.sha}</small></span></div></section>}
-      {job.inspection && <details className="inspection-details" open data-testid="inspection-details"><summary><AlertTriangle size={16} />Artwork inspection · {job.inspection.errors.length} blocking issue(s)</summary><div>{job.inspection.errors.map((item) => <p className="notice warning" key={item}>{item}</p>)}{job.inspection.actions?.map((item) => <p className="inspection-note" key={item}>Corrective action: {item}</p>)}{job.inspection.warnings.map((item) => <p className="inspection-note" key={item}>{item}</p>)}</div></details>}
-      <section className="tasks-section"><div className="section-heading"><h3>Production recipe</h3><span>{job.tasks.filter((item) => item.status === "Completed").length} / 16 complete</span></div><div className="task-list">{job.tasks.map((item, index) => <details className={`task ${index === current ? "current" : ""}`} key={item.id}><summary data-testid={`task-${index + 1}-summary`}><span className={`task-number ${item.status === "Completed" ? "done" : ""}`}>{item.status === "Completed" ? <Check size={15} /> : index + 1}</span><span className="task-title">{item.title}<small>{item.party === "Application" ? "Automated check" : "Human confirmation"}</small></span><Badge status={item.status} /></summary><div className="task-details"><p>{item.result}</p><div className="task-meta"><span>Updated {date(item.updated)}</span></div></div></details>)}</div></section>
+      {job.inspection && <details className="inspection-details" open={job.inspection.errors.length > 0} data-testid="inspection-details"><summary><AlertTriangle size={16} />Artwork inspection · {job.inspection.errors.length} blocking issue(s)</summary><div>{job.inspection.errors.map((item) => <p className="notice warning" key={item}>{item}</p>)}{job.inspection.actions?.map((item) => <p className="inspection-note" key={item}>Corrective action: {item}</p>)}{job.inspection.warnings.map((item) => <p className="inspection-note" key={item}>{item}</p>)}</div></details>}
+      <details className="history-details" data-testid="done-automatically"><summary>Done automatically ({job.tasks.filter((item) => item.status === "Completed").length})</summary><section className="tasks-section"><div className="section-heading"><h3>Production recipe</h3><span>{job.tasks.filter((item) => item.status === "Completed").length} / 16 complete</span></div><div className="task-list">{job.tasks.map((item, index) => <details className={`task ${index === current ? "current" : ""}`} key={item.id}><summary data-testid={`task-${index + 1}-summary`}><span className={`task-number ${item.status === "Completed" ? "done" : ""}`}>{item.status === "Completed" ? <Check size={15} /> : index + 1}</span><span className="task-title">{item.title}<small>{item.party === "Application" ? "Automated check" : "Human confirmation"}</small></span><Badge status={item.status} /></summary><div className="task-details"><p>{item.result}</p><div className="task-meta"><span>Updated {date(item.updated)}</span></div></div></details>)}</div></section><ul className="audit-events" data-testid="job-history">{[...(job.events || [])].slice().reverse().map((event) => <li key={event.id}><p>{event.actor}: {event.text}</p></li>)}</ul><section className="history-details" data-testid="production-review-panel"><div className="next-label"><span className="eyebrow">PRODUCTION REVIEW</span><span>{settings?.aiConnected ? "AI-assisted" : "Rule-based review"}</span></div><h2>Run AI Production Review</h2><p>Reviews saved job evidence only. It cannot approve, complete workflow steps, or print.</p><button className="button" onClick={runAgentReview} disabled={busy} data-testid="run-production-review-button"><ShieldCheck size={17} />{busy ? "Reviewing…" : "Run AI Production Review"}</button>{agentReview && <div className="inspection-details" data-testid="production-review-results"><div className="section-heading"><div><h3 data-testid="production-review-headline">{(agentReview.headline || reviewHeadline(agentReview.results)).title}</h3><p data-testid="production-review-detail">{(agentReview.headline || reviewHeadline(agentReview.results)).detail}</p></div><span>{settings?.aiConnected ? "AI-assisted" : "Rule-based review"}</span></div>{(agentReview.results || []).map((item) => <div className="inspection-note" key={`${agentReview.execution}-${item.agent}`}><strong>{item.agent} · {item.status}</strong><p>{item.summary}</p>{item.stop_reasons?.length > 0 && <p>Next: {item.stop_reasons.join(" ")}</p>}{item.warnings?.length > 0 && <p>Next: {item.warnings.join(" ")}</p>}{item.data?.selected_plan?.cost_estimate && <p data-testid="cost-estimate-summary">Cost {item.data.selected_plan.cost_estimate.total} · Margin {item.data.selected_plan.cost_estimate.profit_margin_percent ?? "unavailable"}%</p>}{item.data?.money_cost === "UNKNOWN" && <p data-testid="cost-inputs-missing">Cost inputs are unavailable; no cheapest route is claimed.</p>}</div>)}</div>}</section></details>
     </div>
     </div>
   </div>;
@@ -771,6 +804,21 @@ function LondonChecklist({ job, action, busy }) {
   const steps = job.productionChecklist || [];
   const current = steps.find((step) => step.status !== "done");
   const cutter = job.recipe?.production?.cutter;
+  const coating = knownFinish(job.finish);
+  const stockSent = useRef(false);
+  useEffect(() => {
+    if (current?.id !== "stock" || !coating || job.productionStop || stockSent.current) return;
+    stockSent.current = true;
+    action("production-step", {
+      step: "stock",
+      ok: true,
+      finish: coating,
+      preset: job.recipe?.production?.preset || "London BC",
+      held: true,
+      file: job.cardRoute?.outputName,
+      sheet: { stretched: false, cropped: false, missingCards: false },
+    });
+  }, [current?.id, coating, job.productionStop, job.id]);
   const advance = (extra = {}) => action("production-step", {
     step: current.id,
     ok: true,
@@ -785,7 +833,7 @@ function LondonChecklist({ job, action, busy }) {
     {job.productionStop && <p className="notice warning" data-testid="london-stop">{job.productionStop}</p>}
     <ol className="london-steps">{steps.map((step) => <li key={step.id} data-testid={`london-step-${step.id}`} className={step.status}><StepKind kind={step.kind} /><strong>{step.title}</strong><p>{step.detail}</p></li>)}</ol>
     {cutter && <p data-testid="duplo-job">Duplo {cutter.model} job no. {cutter.jobNumber}, {cutter.jobName}. Slitter slots {(cutter.slitterSlots || []).join(" and ")}.</p>}
-    {current?.id === "stock" ? <div className="action-row">
+    {current?.id === "stock" && coating && !job.productionStop ? <p data-testid="london-stock-known">Finish is {coating}. Answering the Fiery stock step.</p> : current?.id === "stock" ? <div className="action-row">
       <button type="button" className="primary" disabled={busy} data-testid="london-stock-matte" onClick={() => advance({ finish: "Matte" })}>Select Matte cardstock</button>
       <button type="button" className="button" disabled={busy} data-testid="london-stock-glossy" onClick={() => advance({ finish: "Glossy" })}>Select Glossy cardstock</button>
     </div> : current && <button type="button" className="primary" disabled={busy} data-testid="london-step-advance" onClick={() => advance()}>{current.title}</button>}
@@ -1102,6 +1150,7 @@ function Settings({ settings, user, reload }) {
           stocks: String(form.get("stocks")).split("\n").filter(Boolean),
           sides: [1, 2],
           instructions: form.get("instructions"),
+          fieryAutoSend: form.get("fieryAutoSend") === "on",
         }),
       });
       setMessage("Shop settings saved. Active jobs require a route review.");
@@ -1129,6 +1178,7 @@ function Settings({ settings, user, reload }) {
             <PrinterPicker settings={settings} selected={printer} onSelect={setPrinter} user={user} reload={reload} testPrefix="settings" />
             <label>Supported stocks<textarea name="stocks" defaultValue={(settings.stocks || []).join("\n")} data-testid="stocks-input" /></label>
             <label>Handoff instructions<textarea name="instructions" defaultValue={settings.instructions} data-testid="handoff-instructions-input" /></label>
+            <label className="check-label"><input type="checkbox" name="fieryAutoSend" defaultChecked={settings.fieryAutoSend === true} data-testid="fiery-auto-send-toggle" />After proof approval, send the PRINT_READY file to the Fiery hold queue. The job stays on HOLD and is never printed automatically.</label>
             <button className="primary" data-testid="save-settings-button">Save shop settings</button>
           </fieldset>
         </form>
@@ -1390,7 +1440,8 @@ function Studio() {
   const jobId = params.jobId || location.pathname.match(/^\/jobs\/([^/]+)/)?.[1];
   const [auth, setAuth] = useState(null);
   const authEpoch = useRef(0);
-  const [jobs, setJobs] = useState([]);
+  const [queue, setQueue] = useState({ group: "needs-you", counts: {}, jobs: [], nextCursor: null });
+  const queueGroup = useRef("needs-you");
   const [recipes, setRecipes] = useState([]);
   const [settings, setSettings] = useState(null);
   const [catalog, setCatalog] = useState(null);
@@ -1403,12 +1454,22 @@ function Studio() {
     : location.pathname.startsWith("/recipes")
       ? "recipes"
       : "jobs";
-  const load = async () => {
+  const load = async (group, cursor, append) => {
+    const selected = group || queueGroup.current || "needs-you";
     try {
-      const [foundJobs, foundRecipes, foundSettings, foundCatalog] = await Promise.all([
-        api("jobs"), api("recipes"), api("settings"), api("products"),
+      const params = new URLSearchParams({ group: selected, limit: "50" });
+      if (cursor) params.set("cursor", cursor);
+      const [page, foundRecipes, foundSettings, foundCatalog] = await Promise.all([
+        api(`jobs?${params}`), api("recipes"), api("settings"), api("products"),
       ]);
-      setJobs(foundJobs);
+      const nextGroup = page.group || selected;
+      queueGroup.current = nextGroup;
+      setQueue((current) => ({
+        group: nextGroup,
+        counts: page.counts || {},
+        jobs: append ? [...current.jobs, ...(page.jobs || [])] : (page.jobs || []),
+        nextCursor: page.nextCursor || null,
+      }));
       setRecipes(foundRecipes);
       setSettings(foundSettings);
       setCatalog(foundCatalog);
@@ -1480,13 +1541,14 @@ function Studio() {
     </header>
     {error && <div className="error-bar" data-testid="global-error"><AlertTriangle />{error}<button className="icon-button" onClick={() => setError("")} data-testid="dismiss-error-button"><X /></button></div>}
     {view === "jobs" && !job && <main className="jobs-page" data-testid="jobs-page">
-      <div className="page-heading"><div><span className="eyebrow">YOUR PRODUCTION WORKSPACE</span><h1>Jobs</h1><p className="muted">Every order. Every step. A clear next action.</p></div><button className="primary" onClick={() => setNewJob(true)} data-testid="start-job-button"><Plus />Start a job</button></div>
-      {!jobs.length
+      <div className="page-heading"><div><span className="eyebrow">YOUR PRODUCTION WORKSPACE</span><h1>Jobs</h1><p className="muted">Needs you, waiting, ready to print, and done. One next action at a time.</p></div><button className="primary" onClick={() => setNewJob(true)} data-testid="start-job-button"><Plus />Start a job</button></div>
+      <div className="queue-tabs" data-testid="job-queue">{QUEUE_GROUPS.map(([id, label]) => <button type="button" key={id} className={queue.group === id ? "selected" : ""} data-testid={`queue-${id}`} onClick={() => load(id)}>{label} <span>{queue.counts?.[id] || 0}</span></button>)}</div>
+      {QUEUE_GROUPS.every(([id]) => !(queue.counts?.[id]))
         ? <div className="empty-state" data-testid="jobs-empty-state"><FileText size={36} /><h2>Your first great print starts here.</h2><p>Create a job from a product preset or custom specs, upload artwork, and follow a clear path to an approved proof.</p><button className="primary" onClick={() => setNewJob(true)} data-testid="empty-start-job-button"><Plus />Start a job</button></div>
-        : <div className="job-list">{jobs.map((item) => {
+        : <div className="job-list" data-testid="job-list">{queue.jobs.map((item) => {
           const task = item.tasks?.find((entry) => entry.status !== "Completed");
           return <button className="job-card" key={item.id} onClick={() => navigate(`/jobs/${item.id}`)} data-testid={`job-card-${item.id}`}><div className="product-icon"><FileText /></div><div className="job-card-main"><strong>{item.customer}</strong><p>{productLine(item)}</p></div><div className="job-card-status"><Badge status={displayStatus(item, task)} /></div></button>;
-        })}</div>}
+        })}{!queue.jobs.length && <p className="notice" data-testid="queue-empty">Nothing in this group.</p>}{queue.nextCursor && <button type="button" className="button" data-testid="queue-more" onClick={() => load(queue.group, queue.nextCursor, true)}>More jobs</button>}</div>}
       <footer className="page-foot"><ShieldCheck size={15} />Approvals stay tied to the exact production file.</footer>
     </main>}
     {view === "jobs" && job && <JobView job={job} settings={settings} user={auth.user} reload={reloadJob} back={() => navigate("/jobs")} openSettings={() => navigate("/settings")} onArchived={async () => { setJob(null); navigate("/jobs"); await load(); }} />}
