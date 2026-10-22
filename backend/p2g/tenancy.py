@@ -381,10 +381,16 @@ async def migrate_tenants(database):
 
     A field that is already set is left alone, including a platform
     administrator whose shop_id is explicitly null. Missing shop_id means
-    the row belonged to the original single shop.
+    the row belonged to the original single shop. Settings keep _id "shop"
+    and the connector keeps _id "agent", so the previous application can
+    still open them. The first boot copies the affected collections once
+    unless TENANT_MIGRATION_BACKUP is off.
     """
     with unscoped():
         raw = database.raw if hasattr(database, "raw") else database
+        from p2g.migration_backup import backup_before_migration
+
+        await backup_before_migration(raw)
         await raw.shops.update_one(
             {"_id": PRINT2GO_SHOP_ID},
             {"$setOnInsert": {

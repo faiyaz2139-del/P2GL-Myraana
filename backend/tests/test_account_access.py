@@ -52,6 +52,30 @@ def test_reset_rate_limit_blocks_the_sixth_attempt():
     assert reset_is_limited(6) is True
 
 
+def test_migration_backup_defaults_on_and_rollback_refuses_shared_emails():
+    from p2g.migration_backup import backup_enabled, shared_values
+    import test_tenancy
+    from p2g.migration_backup import supports_server_backup
+
+    previous = os.environ.pop("TENANT_MIGRATION_BACKUP", None)
+    try:
+        assert backup_enabled() is True
+        os.environ["TENANT_MIGRATION_BACKUP"] = "off"
+        assert backup_enabled() is False
+        os.environ["TENANT_MIGRATION_BACKUP"] = "0"
+        assert backup_enabled() is False
+        os.environ["TENANT_MIGRATION_BACKUP"] = "false"
+        assert backup_enabled() is False
+    finally:
+        if previous is None:
+            os.environ.pop("TENANT_MIGRATION_BACKUP", None)
+        else:
+            os.environ["TENANT_MIGRATION_BACKUP"] = previous
+    assert supports_server_backup(test_tenancy.MemoryDB()) is False
+    assert shared_values([{"email": "a@shop.test"}, {"email": "a@shop.test"}], "email") == ["a@shop.test"]
+    assert shared_values([{"email": "a@shop.test"}, {"email": "b@shop.test"}], "email") == []
+
+
 def test_email_provider_defaults_to_log():
     previous = os.environ.pop("EMAIL_PROVIDER", None)
     try:
