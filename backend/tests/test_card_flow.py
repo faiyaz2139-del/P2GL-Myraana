@@ -7,8 +7,13 @@ from p2g.card_flow import (
     apply_card_defaults,
     apply_known_stock,
     auto_bleed,
+    duplo_line,
+    keep_production_route,
     known_finish,
+    manual_press_message,
+    mark_sent_to_fiery,
     operator_touches,
+    print_order,
     page_jobs,
     queue_bucket,
     queue_page_query,
@@ -112,6 +117,69 @@ def test_queue_groups_and_pages_two_thousand_jobs():
     query, ordering = queue_page_query("ready-to-print")
     assert query["queue"] == "ready-to-print"
     assert ordering[0] == ("updated", -1)
+
+
+def test_print_order_stays_on_production_and_a_proof_switch_keeps_the_proof():
+    recipe = london_business_card_recipe()
+    job = _job(
+        recipe=recipe,
+        product="business-card",
+        spec={"product": "business-card", "width": 3.5, "height": 2, "stock": "14pt matte"},
+        stock="14pt matte",
+        finish="Matte",
+        generation=3,
+        approval={"sha": "proof-sha", "fileId": "file-1"},
+        files=[{"id": "file-1", "stage": "PRINT_READY", "sha": "proof-sha", "name": "RA_PRINT_READY.pdf"}],
+        route={"mode": "proof-only", "printer": None},
+    )
+    for index in range(8):
+        job["tasks"][index]["status"] = "Completed"
+        job["tasks"][index]["result"] = f"done-{index}"
+    job["tasks"][8]["status"] = "Completed"
+    job["tasks"][8]["result"] = "Proof-only route selected. No press is assigned and nothing will print."
+    job["tasks"][9]["status"] = "Waiting for operator"
+    job["tasks"][9]["result"] = "Proof only: nothing is sent to a press."
+    assert print_order(job) is True
+    assert print_order(_job(spec={"product": "flyer"}, product="flyer")) is True
+    keep_production_route(job, {"version": 4, "stocks": ["14pt matte"], "printer": "", "discoveredPrinters": []})
+    assert job["route"]["mode"] == "production"
+    assert job["route"]["manual"] is True
+    assert job["approval"] == {"sha": "proof-sha", "fileId": "file-1"}
+    assert job["generation"] == 3
+    assert job["files"][0]["sha"] == "proof-sha"
+    for index in range(8):
+        assert job["tasks"][index]["status"] == "Completed"
+        assert job["tasks"][index]["result"] == f"done-{index}"
+    assert job["tasks"][9]["result"] == manual_press_message(job)
+    assert job["tasks"][9]["result"] == (
+        "Print it yourself: download the PRINT_READY PDF, import it to Fiery, "
+        "hold it, impose with London BC, set 14pt matte"
+    )
+    assert "Proof only" not in job["tasks"][9]["result"]
+    paired = {
+        "version": 4,
+        "discoveredPrinters": [
+            {"name": "Xerox EX-Li PX300 Server 1.0 US(6B:72:F0)", "address": "192.168.0.200", "isFiery": True},
+            {"name": "Color Printer", "address": "192.168.0.200", "isFiery": True},
+        ],
+    }
+    keep_production_route(job, paired)
+    assert job["route"]["mode"] == "production"
+    assert job["route"]["manual"] is False
+    assert job["route"]["printer"] == "Xerox EX-Li PX300 Server 1.0 US(6B:72:F0)"
+    assert "Fiery HOLD" in job["tasks"][9]["result"]
+    assert job["approval"]["sha"] == "proof-sha"
+    keep_production_route(job, {"version": 4, "printer": "", "discoveredPrinters": []})
+    assert mark_sent_to_fiery(job) == "Cut on Duplo DC-618, job 2"
+    assert duplo_line(job) == "Cut on Duplo DC-618, job 2"
+    assert queue_bucket(job) == "printing-cutting"
+    assert job["tasks"][12]["status"] == "Waiting for operator"
+    assert job["tasks"][9]["status"] == "Completed"
+    assert job["approval"]["sha"] == "proof-sha"
+    assert job["generation"] == 3
+    flyer = _job(spec={"product": "flyer"}, product="flyer", stock="100lb Gloss Text")
+    assert "impose this flyer" in manual_press_message(flyer)
+    assert "100lb Gloss Text" in manual_press_message(flyer)
 
 
 def test_known_finish_answers_stock_and_a_hold_leaves_duplo_without_printing():

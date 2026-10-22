@@ -12,6 +12,7 @@ from p2g.printer_discovery import (
     discover,
     encode_name,
     fiery_api_url,
+    looks_like_fiery,
     normalise_reported,
     os_queues,
     parse_get_printer,
@@ -238,6 +239,35 @@ def test_scan_now_stays_due_until_the_connector_reports_it():
     }
     assert scan_is_due(again) is True
     assert scan_is_due(again, incoming_scanned=True) is False
+
+
+def test_shop_fiery_ex_li_is_grouped_with_its_queue():
+    """Live P2GL-2 inventory: only the EX-Li PX300 is a Fiery, plus its queue."""
+    queues = [
+        {"name": "Xerox PrimeLink B9100 (73:e5:38)", "address": "192.168.0.201", "isFiery": False},
+        {"name": "Xerox EX-Li PX300 Server 1.0 US(6B:72:F0)", "address": "192.168.0.200", "isFiery": False},
+        {"name": "Roland DG BY-20 (KGC0586)", "address": "192.168.0.3", "isFiery": False},
+        {"name": "EPSON ET-8550 Series", "address": "192.168.0.100", "isFiery": False},
+        {"name": "EPSON SC-F100 Series", "address": "192.168.0.203", "isFiery": False},
+        {"name": "Color Printer", "address": "192.168.0.200", "isFiery": False},
+        {"name": "Xerox Black&White", "address": "192.168.0.201", "isFiery": False},
+    ]
+    rows = {row["name"]: row for row in discover(os_queues=queues, probe=lambda address: False)}
+    assert rows["Xerox EX-Li PX300 Server 1.0 US(6B:72:F0)"]["isFiery"] is True
+    assert rows["Color Printer"]["isFiery"] is True
+    assert rows["Color Printer"]["address"] == "192.168.0.200"
+    assert rows["Xerox PrimeLink B9100 (73:e5:38)"]["isFiery"] is False
+    assert rows["Xerox Black&White"]["isFiery"] is False
+    assert rows["Roland DG BY-20 (KGC0586)"]["isFiery"] is False
+    assert rows["EPSON ET-8550 Series"]["isFiery"] is False
+    assert rows["EPSON SC-F100 Series"]["isFiery"] is False
+    assert preferred_printer(list(rows.values())) == "Xerox EX-Li PX300 Server 1.0 US(6B:72:F0)"
+    assert looks_like_fiery("Fiery EX-i C60") is True
+    assert looks_like_fiery("EX-P Server") is True
+    assert looks_like_fiery("EFI Command WorkStation") is True
+    assert looks_like_fiery("Xerox PrimeLink B9100 (73:e5:38)") is False
+    second = list(rows.values()) + [{"name": "Other Fiery", "address": "10.1.1.1", "isFiery": True}]
+    assert preferred_printer(second) is None
 
 
 def test_connector_ships_the_same_discovery_module():

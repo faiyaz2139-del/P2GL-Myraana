@@ -2,8 +2,9 @@
 
 The connector runs this on the shop computer. Tests pass the network and
 command results in, so nothing here contacts a printer unless a caller asks.
-A printer is an EFI Fiery when its name or model says Fiery, or when
-https://<address>:443/live/api/v5 answers.
+A printer is an EFI Fiery when its name matches a Fiery server (EX-Li, EX-i,
+EX-P, EX … Server, PX300, Fiery, EFI, Command WorkStation), when another queue
+shares that server's IP, or when https://<address>:443/live/api/v5 answers.
 """
 import json
 import platform
@@ -31,20 +32,89 @@ _FIERY_STATUSES = {200, 201, 204, 301, 302, 401, 403}
 _WEAK_PROTOCOLS = {"", "queue", "usb"}
 
 
+# Fiery EX-i, EX-Li, EX-P, EX … Server, PX300, and the EFI / Command WorkStation names.
+_FIERY_NAME = re.compile(
+    r"fiery|command\s+workstation|\befi\b|ex-li|ex-i\b|ex-p\b|\bpx\d{2,}\b|\bex\b[\w\s./()-]{0,48}\bserver\b",
+    re.IGNORECASE,
+)
+
+
 def looks_like_fiery(*parts):
-    blob = " ".join(str(part or "") for part in parts).lower()
-    return "fiery" in blob
+    blob = " ".join(str(part or "") for part in parts)
+    return bool(_FIERY_NAME.search(blob))
+
+
+def host_key(address):
+    """IP or hostname used to group a Fiery server with the queues on that host."""
+    text = str(address or "").strip().lower()
+    if not text:
+        return ""
+    text = re.sub(r"^[a-z][a-z0-9+.-]*://", "", text)
+    if text.startswith("ip_"):
+        text = text[3:]
+    text = text.split("/")[0].strip()
+    if text.startswith("[") and "]" in text:
+        return text[1:text.index("]")]
+    if text.count(":") == 1:
+        text = text.split(":")[0]
+    return text
+
+
+def mark_fiery_queues(rows):
+    """A queue that shares an IP with a Fiery server is that Fiery's queue."""
+    hosts = set()
+    for row in rows or []:
+        if not isinstance(row, dict) or not row.get("isFiery"):
+            continue
+        key = host_key(row.get("address"))
+        if key:
+            hosts.add(key)
+    if not hosts:
+        return rows
+    for row in rows:
+        if isinstance(row, dict) and host_key(row.get("address")) in hosts:
+            row["isFiery"] = True
+    return rows
 
 
 def preferred_printer(rows):
-    """The press to select when the shop has exactly one Fiery."""
-    names = []
+    """The business-card press when the shop has exactly one Fiery host.
+
+    Queues on that host count as the same Fiery. The server name is the one
+    selected. The operator can still choose a different queue.
+    """
+    groups = {}
     for row in rows or []:
-        if isinstance(row, dict) and row.get("isFiery") and str(row.get("name") or "").strip():
-            names.append(str(row["name"]).strip())
-    if len(names) == 1:
-        return names[0]
-    return None
+        if not isinstance(row, dict) or not row.get("isFiery"):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        key = host_key(row.get("address")) or name.lower()
+        groups.setdefault(key, []).append(row)
+    if len(groups) != 1:
+        return None
+    members = next(iter(groups.values()))
+    servers = [
+        row for row in members
+        if looks_like_fiery(row.get("name"), row.get("model"), row.get("driver"))
+    ]
+    if not servers:
+        return str(members[0].get("name") or "").strip() or None
+
+    def rank(row):
+        blob = f"{row.get('name') or ''} {row.get('model') or ''}".lower()
+        score = 0
+        if "server" in blob:
+            score += 4
+        if any(token in blob for token in ("ex-li", "ex-i", "ex-p", "px")):
+            score += 2
+        if "fiery" in blob or re.search(r"\befi\b", blob):
+            score += 1
+        return score
+
+    chosen = max(servers, key=rank)
+    return str(chosen.get("name") or "").strip() or None
 
 
 def scan_is_due(settings, incoming_scanned=False):
@@ -128,7 +198,7 @@ def normalise_reported(items):
         if item.get("isFiery"):
             row["isFiery"] = True
         rows.append(row)
-    return merge_printers(rows)[:50]
+    return mark_fiery_queues(merge_printers(rows))[:50]
 
 
 def merge_printers(rows):
@@ -217,7 +287,7 @@ def discover(mdns_services=None, os_queues=None, browse=None, list_queues=None, 
         row = from_queue(queue)
         if row and row.get("name"):
             rows.append(row)
-    return mark_fiery_apis(merge_printers(rows), probe)
+    return mark_fiery_queues(mark_fiery_apis(merge_printers(rows), probe))
 
 
 def mark_fiery_apis(rows, probe, limit=4):

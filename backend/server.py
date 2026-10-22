@@ -24,9 +24,14 @@ from p2g.card_flow import (
     apply_known_stock,
     auto_send_ready,
     clamp_limit,
+    duplo_line,
     encode_cursor,
     fiery_target,
+    keep_production_route,
     known_finish,
+    manual_press_message,
+    mark_sent_to_fiery,
+    print_order,
     queue_bucket,
     queue_page_query,
     QUEUE_IDS,
@@ -45,7 +50,7 @@ from p2g.catalog_seed import SpecError
 from p2g.costing import CostValidationError, cost_profile
 from p2g.core import AppError, db, new_id, now
 from p2g.present import status_label
-from p2g.printer_discovery import normalise_reported, scan_is_due
+from p2g.printer_discovery import normalise_reported, preferred_printer, scan_is_due
 from p2g.printers import filter_printers, is_virtual_printer, printer_status
 from p2g.london_card import (
     WORKFLOW_NAME,
@@ -1432,6 +1437,10 @@ async def job_action(job_id: str, request: Request):
                 "printed": False,
             }
             job.pop("productionStop", None)
+        elif print_order(job):
+            keep_production_route(job, settings_data)
+            update_task(job, 8, "Completed", job["tasks"][8]["result"], AUTO_ACTOR)
+            update_task(job, 9, "Waiting for operator", job["tasks"][9]["result"], AUTO_ACTOR)
     elif action == "route":
         require_completed(job, 8)
         settings_data = await shop_settings()
@@ -1463,7 +1472,13 @@ async def job_action(job_id: str, request: Request):
             verified = settings_data.get("verifiedPrinters") or []
             stock_ok = job["stock"] in (settings_data.get("stocks") or [])
             printer_ok = bool(printer) and (not verified or printer in verified)
-            if not printer_ok or not stock_ok:
+            if print_order(job) and not (printer_ok and stock_ok):
+                # A missing press must not turn a print order into a proof.
+                # Earlier steps, including the approved proof, stay completed.
+                keep_production_route(job, settings_data)
+                update_task(job, 8, "Completed", job["tasks"][8]["result"], user["name"])
+                update_task(job, 9, "Waiting for operator", job["tasks"][9]["result"], user["name"])
+            elif not printer_ok or not stock_ok:
                 problems = []
                 if not printer:
                     problems.append("No printer is selected.")
@@ -1477,22 +1492,21 @@ async def job_action(job_id: str, request: Request):
                     409,
                     code="machine-required",
                 )
-            job["route"] = {
-                "mode": "production",
-                "settingsVersion": settings_data["version"],
-                "printer": printer,
-            }
-            update_task(job, 8, "Completed", f"Production route selected: {printer}.", user["name"])
-            if is_london_card(job.get("recipe") or {}):
-                update_task(
-                    job,
-                    9,
-                    "Waiting for operator",
-                    "Import the PRINT_READY file in Fiery and put it on HOLD. This does not print.",
-                    user["name"],
-                )
             else:
-                update_task(job, 9, "Waiting for operator", "Record the RIP job name. This does not print.", user["name"])
+                job["route"] = {
+                    "mode": "production",
+                    "settingsVersion": settings_data["version"],
+                    "printer": printer,
+                    "manual": False,
+                }
+                update_task(job, 8, "Completed", f"Production route selected: {printer}. The approved proof was kept.", user["name"])
+                if is_london_card(job.get("recipe") or {}) or print_order(job):
+                    message = manual_press_message(job) if not fiery_target(settings_data) else (
+                        "Send the PRINT_READY file to the Fiery HOLD queue. It stays on HOLD and will not print."
+                    )
+                    update_task(job, 9, "Waiting for operator", message, user["name"])
+                else:
+                    update_task(job, 9, "Waiting for operator", "Record the RIP job name. This does not print.", user["name"])
     elif action == "production-step":
         require_completed(job, 9)
         if job["tasks"][9]["status"] == "Completed":
@@ -1578,7 +1592,7 @@ async def job_action(job_id: str, request: Request):
             if not payload.get("acknowledged"):
                 raise AppError("Confirm only after the sheets physically print.")
             update_task(job, 12, "Completed", "Physical printing confirmed by operator.", user["name"])
-            update_task(job, 13, "Waiting for operator", "Cut and finish the cards.", user["name"])
+            update_task(job, 13, "Waiting for operator", duplo_line(job) or "Cut and finish the cards.", user["name"])
         elif action == "cut":
             require_completed(job, 13)
             if not payload.get("acknowledged"):
@@ -1620,6 +1634,71 @@ async def job_action(job_id: str, request: Request):
                 raise AppError("Confirm packing and choose collection or delivery.")
             update_task(job, 15, "Completed", "Packed and complete.", user["name"])
             job["state"] = "complete"
+    elif action == "mark-sent":
+        require_completed(job, 9)
+        if (job.get("route") or {}).get("mode") != "production":
+            raise AppError("Switch to the production route before marking the file sent.", 409)
+        if not print_ready or job.get("approval", {}).get("sha") != print_ready["sha"]:
+            raise AppError("Approve this exact PDF before sending it.")
+        mark_sent_to_fiery(job)
+        line = duplo_line(job)
+        update_task(job, 9, job["tasks"][9]["status"], job["tasks"][9]["result"], user["name"])
+        update_task(job, 10, job["tasks"][10]["status"], job["tasks"][10]["result"], user["name"])
+        update_task(job, 11, job["tasks"][11]["status"], job["tasks"][11]["result"], user["name"])
+        update_task(job, 12, job["tasks"][12]["status"], job["tasks"][12]["result"], user["name"])
+        if line:
+            update_task(job, 13, job["tasks"][13]["status"], line, user["name"])
+        job["authorization"] = {
+            "sha": print_ready["sha"],
+            "fileId": print_ready["id"],
+            "generation": job["generation"],
+            "actor": user["name"],
+            "at": now(),
+            "manual": True,
+        }
+        job["manualFiery"] = {"at": now(), "actor": user["name"], "sha": print_ready["sha"]}
+    elif action == "send-hold":
+        require_completed(job, 9)
+        if (job.get("route") or {}).get("mode") != "production":
+            raise AppError("Switch to the production route before sending to Fiery.", 409)
+        if not print_ready or job.get("approval", {}).get("sha") != print_ready["sha"]:
+            raise AppError("Approve this exact PDF before sending it.")
+        settings_data = await shop_settings()
+        printer = fiery_target(settings_data)
+        if not printer:
+            raise AppError(
+                "No Fiery is paired yet. Download the PRINT_READY file and send it yourself, or pair the connector.",
+                409,
+            )
+        route = dict(job.get("route") or {})
+        route["mode"] = "production"
+        route["printer"] = route.get("printer") or printer.get("name")
+        route["manual"] = False
+        route["settingsVersion"] = settings_data.get("version")
+        job["route"] = route
+        preset = "London BC" if is_london_card(job.get("recipe") or {}) else (
+            ((job.get("recipe") or {}).get("production") or {}).get("preset") or ""
+        )
+        job["fieryHold"] = {
+            "status": "queued",
+            "explicit": True,
+            "preset": preset or "London BC",
+            "stock": job.get("stock") or "",
+            "finish": job.get("finish"),
+            "printer": printer.get("name") or "",
+            "address": printer.get("address") or "",
+            "at": now(),
+            "held": False,
+            "printed": False,
+        }
+        job.pop("productionStop", None)
+        update_task(
+            job,
+            9,
+            "Running",
+            "Sending the PRINT_READY file to the Fiery hold queue. It will not print.",
+            user["name"],
+        )
     else:
         raise AppError("This protected action is not available in the current workflow.")
     await save_job(job)
