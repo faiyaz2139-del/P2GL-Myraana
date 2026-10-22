@@ -7,7 +7,7 @@ from reportlab.pdfgen import canvas
 
 from p2g.catalog_seed import load_presets, parse_sizes
 from p2g.pdfcheck import inspect, make_print_ready, prepare, verify
-from p2g.present import status_label
+from p2g.present import reset_result, status_label
 from p2g.printers import filter_printers, is_virtual_printer
 from p2g.products import (
     SpecError,
@@ -234,6 +234,13 @@ def test_proof_approval_changes_the_job_badge():
     job["tasks"][0]["status"] = "Waiting for approval"
     job["tasks"].pop()
     assert status_label(job) == "Waiting for approval"
+
+
+def test_a_new_job_keeps_not_started_on_steps_it_has_not_reached():
+    reason = "New artwork version: downstream checks and approvals invalidated."
+    assert reset_result({"status": "Pending", "result": "Not started."}, reason) == "Not started."
+    assert reset_result({"status": "Completed", "result": "Checked 1 page(s)."}, reason) == reason
+    assert reset_result({"status": "Waiting for operator", "result": "Confirm bleed handling."}, reason) == reason
 
 
 def test_review_headline_counts_passes_before_a_stop():
