@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Print2Go file connector. Writes authorized PDF files. NEVER triggers printing.
+"""Print2Go legacy file connector. Writes authorized PDF files. NEVER triggers printing.
+
+This shared CONNECTOR_SECRET path is for the original Print2Go shop only.
+Other shops pair a Windows Connector from Shop settings and do not use this secret.
 Requires Python 3.10+, HTTPS site URL, server CONNECTOR_SECRET shared locally.
 Site privacy must allow this machine's authenticated access; owner-private Sites
 can block requests before this API. See setup guide. No passwords are logged.

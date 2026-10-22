@@ -40,11 +40,26 @@ from p2g.products import (
     resolve_spec,
 )
 from p2g.public_forms import FormError, lead_from_payload, signup_result
+from p2g.account_access import (
+    SUSPENDED_MESSAGE,
+    public_lead,
+    reset_is_limited,
+    reset_request_message,
+    shop_allows_sign_in,
+    shop_directory_row,
+)
+from p2g.mail import MailError, public_base, send_email
 from p2g.shops import (
     accept_invite,
+    confirm_password_reset,
     create_invite,
+    issue_password_reset,
+    list_invites,
+    open_shop_from_lead,
     provision_shop,
     replace_settings,
+    resend_invite,
+    revoke_invite,
     save_connector_agent,
 )
 from p2g.tenancy import (
@@ -269,6 +284,10 @@ async def auth_login(request: Request):
     user = matches[0] if matches else None
     if not user or not password_matches(password, user["password"]):
         raise AppError("Email or password is incorrect.", 401)
+    if user.get("shop_id"):
+        shop = await db.shops.find_one({"_id": user["shop_id"]}, {"status": 1})
+        if not shop or not shop_allows_sign_in(shop.get("status")):
+            raise AppError(SUSPENDED_MESSAGE, 403)
     token, cookie, safe_user = session_response(request, user)
     await create_session(token, user["id"], user.get("shop_id"))
     response = JSONResponse({"user": safe_user})
@@ -396,17 +415,91 @@ async def platform_shops(request: Request):
     user = await current_user(request)
     if not is_superadmin(user):
         raise AppError("Only a platform administrator can do that.", 403)
+    return await _platform_directory()
+
+
+def _require_platform(user):
+    if not is_superadmin(user):
+        raise AppError("Only a platform administrator can do that.", 403)
+    return user
+
+
+async def _platform_directory():
     with unscoped():
-        rows = await db.shops.find({}).to_list(500)
-    return [
-        {
-            "id": row.get("_id"),
-            "name": row.get("name"),
-            "slug": row.get("slug"),
-            "created": row.get("created"),
-        }
-        for row in rows
-    ]
+        rows = await db.shops.find({}).sort("created", -1).to_list(500)
+        listed = []
+        for row in rows:
+            shop_id = row.get("_id")
+            users = await db.users.count_documents({"shop_id": shop_id})
+            jobs = await db.jobs.count_documents({"shop_id": shop_id})
+            latest = await db.jobs.find(
+                {"shop_id": shop_id},
+                {"updated": 1, "customer": 0, "files": 0, "messages": 0, "events": 0, "spec": 0},
+            ).sort("updated", -1).to_list(1)
+            last = latest[0].get("updated") if latest else None
+            listed.append(shop_directory_row(row, users, jobs, last))
+    return listed
+
+
+@api.post("/platform/shops/{shop_id}/suspend")
+async def suspend_shop(shop_id: str, request: Request):
+    assert_origin(request)
+    _require_platform(await current_user(request))
+    return await _set_shop_status(shop_id, "suspended")
+
+
+@api.post("/platform/shops/{shop_id}/approve")
+async def approve_shop(shop_id: str, request: Request):
+    assert_origin(request)
+    _require_platform(await current_user(request))
+    return await _set_shop_status(shop_id, "active")
+
+
+async def _set_shop_status(shop_id, status):
+    with unscoped():
+        result = await db.shops.update_one({"_id": shop_id}, {"$set": {"status": status}})
+    if not getattr(result, "matched_count", 0):
+        raise AppError("That shop was not found.", 404)
+    return {"ok": True, "id": shop_id, "status": status}
+
+
+@api.get("/platform/leads")
+async def platform_leads(request: Request):
+    _require_platform(await current_user(request))
+    with unscoped():
+        rows = await db.leads.find({"converted": {"$ne": True}}).sort("created", -1).to_list(200)
+    return [public_lead(row) for row in rows]
+
+
+@api.post("/platform/leads/{lead_id}/approve")
+async def approve_platform_lead(lead_id: str, request: Request):
+    assert_origin(request)
+    actor = _require_platform(await current_user(request))
+    with unscoped():
+        lead = await db.leads.find_one({"id": lead_id})
+    if not lead:
+        raise AppError("That request was not found.", 404)
+    if lead.get("converted") and lead.get("shop_id"):
+        return {"ok": True, "already": True, "shopId": lead["shop_id"]}
+    shop, invite = await open_shop_from_lead(
+        lead,
+        actor["id"],
+        link_for=lambda token: _invite_link(request, token),
+    )
+    await db.leads.update_one(
+        {"id": lead_id},
+        {"$set": {"converted": True, "shop_id": shop["_id"]}},
+    )
+    body = {
+        "ok": True,
+        "shopId": shop["_id"],
+        "slug": shop["slug"],
+        "emailed": bool(invite.get("emailed")),
+        "provider": invite.get("provider"),
+    }
+    if invite.get("token"):
+        body["token"] = invite["token"]
+    return body
 
 
 async def _store_lead(payload, default_intent):
@@ -512,7 +605,8 @@ async def settings(request: Request):
         **settings_data,
         "artworkRules": artwork_rules_from_settings(settings_data),
         "aiConnected": ai_configured(),
-        "connectorConfigured": bool(os.environ.get("CONNECTOR_SECRET")),
+        "connectorConfigured": True,
+        "legacyConnector": bool(os.environ.get("CONNECTOR_SECRET")),
         "billing": billing_status(),
         "agent": agent,
         "connected": bool(agent and agent.get("writable")),
@@ -738,11 +832,105 @@ async def create_user(request: Request):
     return {"ok": True}
 
 
+def _invite_link(request, token):
+    return f"{public_base(request)}/login?invite={token}"
+
+
+async def _shop_label(user):
+    with unscoped():
+        shop = await db.shops.find_one({"_id": user.get("shop_id")})
+    return (shop or {}).get("name") or "your shop"
+
+
+@api.get("/invites")
+async def pending_invites(request: Request):
+    require_admin(await current_user(request))
+    return await list_invites()
+
+
 @api.post("/invites")
 async def invite_operator(request: Request):
     assert_origin(request)
     user = require_admin(await current_user(request))
-    return await create_invite(user, await request.json())
+    shop_name = await _shop_label(user)
+    return await create_invite(
+        user,
+        await request.json(),
+        link_for=lambda token: _invite_link(request, token),
+        shop_name=shop_name,
+    )
+
+
+@api.post("/invites/{invite_id}/resend")
+async def resend_operator_invite(invite_id: str, request: Request):
+    assert_origin(request)
+    user = require_admin(await current_user(request))
+    shop_name = await _shop_label(user)
+    return await resend_invite(
+        user,
+        invite_id,
+        lambda token: _invite_link(request, token),
+        shop_name,
+    )
+
+
+@api.post("/invites/{invite_id}/revoke")
+async def revoke_operator_invite(invite_id: str, request: Request):
+    assert_origin(request)
+    require_admin(await current_user(request))
+    return await revoke_invite(invite_id)
+
+
+@api.post("/public/password-reset")
+async def request_password_reset(request: Request):
+    """Same reply whether or not the shop has this email. The attempt is counted either way."""
+    assert_origin(request)
+    payload = await request.json()
+    email = str(payload.get("email") or "").strip().lower()
+    shop_slug_value = str(payload.get("shop") or payload.get("shopSlug") or "").strip().lower()
+    if "@" not in email or " " in email or len(email) > 200:
+        raise AppError("Enter a valid email address.", 400)
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    attempt = {"email": email, "shop": shop_slug_value, "purpose": "password-reset"}
+    user = None
+    shop = None
+    with unscoped():
+        count = await db.auth_attempts.count_documents({**attempt, "created": {"$gt": cutoff}})
+        if reset_is_limited(count):
+            raise AppError("Too many reset requests. Try again later.", 429)
+        await db.auth_attempts.insert_one({**attempt, "_id": new_id(), "created": now()})
+        if shop_slug_value:
+            shop = await db.shops.find_one({"slug": shop_slug_value})
+        if shop:
+            user = await db.users.find_one({"email": email, "shop_id": shop["_id"]})
+    if (
+        user
+        and shop
+        and user.get("role") != "superadmin"
+        and shop_allows_sign_in(shop.get("status"))
+    ):
+        raw = await issue_password_reset(user["id"], email, shop["_id"])
+        link = f"{public_base(request)}/login?reset={raw}"
+        text = (
+            f"A password reset was requested for {shop.get('name') or 'your shop'}.\n\n"
+            "Open this link to choose a new password. It works once and expires in one hour.\n\n"
+            f"{link}\n"
+        )
+        try:
+            send_email(email, "Reset your Myraana password", text)
+        except MailError:
+            pass
+    return {"ok": True, "message": reset_request_message(bool(user and shop))}
+
+
+@api.post("/public/password-reset/confirm")
+async def confirm_password_reset_request(request: Request):
+    assert_origin(request)
+    payload = await request.json()
+    await confirm_password_reset(payload.get("token"), payload.get("password"))
+    return {"ok": True, "message": "Password updated. Sign in with the new password."}
 
 
 @api.post("/public/invites/accept")

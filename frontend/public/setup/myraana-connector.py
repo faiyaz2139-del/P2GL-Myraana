@@ -1,7 +1,9 @@
 """Preview Windows connector: read-only discovery, pairing, and HTTPS heartbeats.
 
-This program never prints, creates test pages, changes printer settings, or writes
-to hot folders. Build on Windows with the adjacent PowerShell script.
+The pairing code is created in one shop's settings and only joins that shop.
+This program does not use CONNECTOR_SECRET. It never prints, creates test pages,
+changes printer settings, or writes to hot folders. Build on Windows with the
+adjacent PowerShell script.
 """
 import argparse
 import json

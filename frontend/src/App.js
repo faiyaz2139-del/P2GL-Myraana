@@ -74,13 +74,18 @@ function Badge({ status }) {
 
 function Auth({ auth, onSignedIn }) {
   const [params] = useSearchParams();
+  const navigate = useNavigate();
   const invite = params.get("invite") || "";
+  const resetToken = invite ? "" : (params.get("reset") || "");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [forgot, setForgot] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const submit = async (event) => {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formNode = event.currentTarget;
+    const form = new FormData(formNode);
     setBusy(true);
     setError("");
     try {
@@ -110,12 +115,64 @@ function Auth({ auth, onSignedIn }) {
     }
   };
 
-  const heading = invite ? "Join your shop" : auth.needsSetup ? "Set up your shop" : "Welcome back";
+  const requestReset = async (event) => {
+    event.preventDefault();
+    const formNode = event.currentTarget;
+    const form = new FormData(formNode);
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await api("public/password-reset", {
+        method: "POST",
+        body: JSON.stringify({ email: form.get("email"), shop: form.get("shop") || "" }),
+      });
+      setNotice(result.message);
+    } catch (reason) {
+      setError(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmReset = async (event) => {
+    event.preventDefault();
+    const formNode = event.currentTarget;
+    const form = new FormData(formNode);
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api("public/password-reset/confirm", {
+        method: "POST",
+        body: JSON.stringify({ token: resetToken, password: form.get("password") }),
+      });
+      setNotice(result.message);
+      navigate("/login", { replace: true });
+    } catch (reason) {
+      setError(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const heading = invite
+    ? "Join your shop"
+    : resetToken
+      ? "Choose a new password"
+      : forgot
+        ? "Reset your password"
+        : auth.needsSetup
+          ? "Set up your shop"
+          : "Welcome back";
   const intro = invite
     ? "Choose a password to accept this invite. It only joins the shop that sent it."
-    : auth.needsSetup
-      ? "Create the first administrator account."
-      : "Sign in to continue your production work.";
+    : resetToken
+      ? "This link works once. After you save, sign in with the new password."
+      : forgot
+        ? "Enter the email and the shop address. We reply the same way whether or not that account exists."
+        : auth.needsSetup
+          ? "Create the first administrator account."
+          : "Sign in to continue your production work.";
 
   return <div className="auth-shell" data-testid="auth-screen">
     <div className="auth-art">
@@ -134,7 +191,33 @@ function Auth({ auth, onSignedIn }) {
       <h2>{heading}</h2>
       <p className="muted">{intro}</p>
       {error && <div className="notice warning" role="alert" data-testid="auth-error">{error}</div>}
-      <form onSubmit={submit} data-testid={invite ? "invite-accept-form" : "auth-form"}>
+      {notice && <div className="notice" role="status" data-testid="auth-notice">{notice}</div>}
+      {resetToken && <form onSubmit={confirmReset} data-testid="reset-confirm-form">
+        <label>New password
+          <input name="password" required type="password" minLength="12" maxLength="200"
+            autoComplete="new-password" data-testid="reset-password-input" placeholder="At least 12 characters" />
+        </label>
+        <button className="primary wide" disabled={busy} data-testid="reset-confirm-button">
+          {busy ? "Saving…" : "Save password"}
+        </button>
+      </form>}
+      {!resetToken && forgot && <form onSubmit={requestReset} data-testid="reset-request-form">
+        <label>Email
+          <input name="email" required type="email" autoComplete="username"
+            data-testid="reset-email-input" placeholder="you@yourshop.ca" />
+        </label>
+        <label>Shop address
+          <input name="shop" required maxLength="80" autoComplete="off"
+            data-testid="reset-shop-input" placeholder="print2go" />
+        </label>
+        <button className="primary wide" disabled={busy} data-testid="reset-request-button">
+          {busy ? "Sending…" : "Send reset link"}
+        </button>
+        <button type="button" className="text-button" data-testid="reset-back-button" onClick={() => { setForgot(false); setNotice(""); setError(""); }}>
+          Back to sign in
+        </button>
+      </form>}
+      {!resetToken && !forgot && <form onSubmit={submit} data-testid={invite ? "invite-accept-form" : "auth-form"}>
         {(auth.needsSetup || invite) && <label>Your name
           <input name="name" required maxLength="80" autoComplete="name"
             data-testid="setup-name-input" placeholder="Shop administrator" />
@@ -155,7 +238,10 @@ function Auth({ auth, onSignedIn }) {
         <button className="primary wide" disabled={busy} data-testid="auth-submit-button">
           {busy ? "Saving…" : invite ? "Join shop" : auth.needsSetup ? "Create shop account" : "Sign in"}
         </button>
-      </form>
+      </form>}
+      {!invite && !resetToken && !forgot && !auth.needsSetup && <button type="button" className="text-button" data-testid="forgot-password-button" onClick={() => { setForgot(true); setError(""); }}>
+        Forgot password?
+      </button>}
       <p className="tiny"><ShieldCheck size={14} />Files and approvals stay in your shop.</p>
     </main>
   </div>;
@@ -465,7 +551,7 @@ function ConnectorPairing({ settings, reload }) {
   };
   return <section className="settings-card" data-testid="connector-pairing-panel">
     <div className="section-heading"><h3>Connect Windows Connector</h3><Link2 /></div>
-    <p>Discovery is read-only. It cannot print, change printer settings, or release jobs.</p>
+    <p data-testid="connector-pairing-scope">This code pairs a connector for this shop only. Discovery is read-only. It cannot print, change printer settings, or release jobs.</p>
     <a className="button" href="https://github.com/faiyaz2139-del/P2GL-Myraana/releases/download/windows-connector-preview/MyraanaConnector.zip" data-testid="download-windows-connector-link">
       <Download size={16} />Download Windows Connector
     </a>
@@ -694,8 +780,9 @@ function Settings({ settings, user, reload }) {
       <section className="settings-card">
         <div className="section-heading"><h3>Connect shop</h3><Link2 /></div>
         <p data-testid="connector-status">{settings.connected ? "The connector reports a writable destination." : "No verified local connection. Use a proof-only route until a press is verified."}</p>
-        <a className="button" href="/setup/print2go-connector.py" download data-testid="download-connector-link"><Download size={16} />Download local connector</a>
-        <details className="technical"><summary data-testid="connector-setup-summary">Connection setup</summary><ol><li>Configure the server and shop computer with the same connector secret.</li><li>Set the HTTPS Studio URL and a writable staging folder.</li><li>Run the connector. It stages authorized PDFs only; it never prints.</li></ol></details>
+        <p data-testid="connector-shop-note">Each shop pairs its own Windows Connector from this page. The pairing code belongs to this shop only.</p>
+        {settings.legacyConnector && <a className="button" href="/setup/print2go-connector.py" download data-testid="download-connector-link"><Download size={16} />Download Print2Go legacy connector</a>}
+        <details className="technical"><summary data-testid="connector-setup-summary">Connection setup</summary><ol><li>Pair this shop’s Windows Connector with the one-time code below. No shared secret is required.</li><li>The original Print2Go installation can keep using its server connector secret. That secret does not open another shop.</li><li>The connector stages authorized PDFs only. It never prints.</li></ol></details>
       </section>
       {user.role === "admin" && <ConnectorPairing settings={settings} reload={reload} />}
       {user.role === "admin" && <CostProfiles />}
@@ -718,7 +805,16 @@ function Operators() {
   const [message, setMessage] = useState("");
   const [inviteMessage, setInviteMessage] = useState("");
   const [inviteLink, setInviteLink] = useState("");
+  const [pending, setPending] = useState([]);
   const [busy, setBusy] = useState(false);
+  const loadInvites = async () => {
+    try {
+      setPending(await api("invites"));
+    } catch (reason) {
+      setInviteMessage(reason.message);
+    }
+  };
+  useEffect(() => { loadInvites(); }, []);
   const submit = async (event) => {
     event.preventDefault();
     const formNode = event.currentTarget;
@@ -748,7 +844,37 @@ function Operators() {
       });
       formNode.reset();
       setInviteLink(`${window.location.origin}/login?invite=${result.token}`);
-      setInviteMessage("Invite ready. Send this link. It expires in 7 days and only joins this shop.");
+      setInviteMessage(result.emailed
+        ? "Invite emailed. The link is below if you also want to copy it. It expires in 7 days and only joins this shop."
+        : "Invite ready. Email was logged or not configured, so copy this link. It expires in 7 days and only joins this shop.");
+      await loadInvites();
+    } catch (reason) {
+      setInviteMessage(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const resend = async (id) => {
+    setBusy(true);
+    try {
+      const result = await api(`invites/${id}/resend`, { method: "POST", body: "{}" });
+      setInviteLink(`${window.location.origin}/login?invite=${result.token}`);
+      setInviteMessage(result.emailed
+        ? "Invite resent by email. The new link replaces the old one."
+        : "Invite resent. Email was logged or not configured, so copy the new link.");
+      await loadInvites();
+    } catch (reason) {
+      setInviteMessage(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const revoke = async (id) => {
+    setBusy(true);
+    try {
+      await api(`invites/${id}/revoke`, { method: "POST", body: "{}" });
+      setInviteMessage("Invite revoked. That link can no longer be used.");
+      await loadInvites();
     } catch (reason) {
       setInviteMessage(reason.message);
     } finally {
@@ -776,7 +902,98 @@ function Operators() {
     {inviteLink && <label>Invite link
       <input readOnly value={inviteLink} data-testid="invite-link" onFocus={(event) => event.target.select()} />
     </label>}
+    {!!pending.length && <ul className="plain-list" data-testid="invite-list">
+      {pending.map((item) => <li key={item.id} data-testid={`invite-row-${item.id}`}>
+        <span>{item.email} · {item.role}{item.revoked ? " · revoked" : ""}</span>
+        <button type="button" className="text-button" disabled={busy} data-testid={`invite-resend-${item.id}`} onClick={() => resend(item.id)}>Resend</button>
+        {!item.revoked && <button type="button" className="text-button" disabled={busy} data-testid={`invite-revoke-${item.id}`} onClick={() => revoke(item.id)}>Revoke</button>}
+      </li>)}
+    </ul>}
   </section>;
+}
+
+function PlatformScreen({ onSignedOut }) {
+  const [shops, setShops] = useState([]);
+  const [leads, setLeads] = useState([]);
+  const [message, setMessage] = useState("");
+  const [inviteLink, setInviteLink] = useState("");
+  const [busy, setBusy] = useState(false);
+  const load = async () => {
+    const [shopRows, leadRows] = await Promise.all([api("platform/shops"), api("platform/leads")]);
+    setShops(shopRows);
+    setLeads(leadRows);
+  };
+  useEffect(() => { load().catch((reason) => setMessage(reason.message)); }, []);
+  const run = async (path, created) => {
+    setBusy(true);
+    setMessage("");
+    try {
+      const result = await api(path, { method: "POST", body: "{}" });
+      if (created && result.token) {
+        setInviteLink(`${window.location.origin}/login?invite=${result.token}`);
+        setMessage(result.emailed
+          ? "Shop created and the owner invite was emailed."
+          : "Shop created. Email was logged or not configured, so copy the owner invite.");
+      } else if (created && result.already) {
+        setInviteLink("");
+        setMessage("That request already has a shop.");
+      } else {
+        setInviteLink("");
+        setMessage("Shop updated.");
+      }
+      await load();
+    } catch (reason) {
+      setMessage(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <div className="auth-shell platform-shell" data-testid="platform-screen">
+    <main className="platform-main">
+      <div className="page-heading">
+        <div>
+          <span className="eyebrow">PLATFORM</span>
+          <h1>Shops</h1>
+          <p className="muted">Status and counts only. Job files, customers, and messages stay inside each shop.</p>
+        </div>
+        <button className="text-button" data-testid="platform-sign-out-button" onClick={onSignedOut}><LogOut size={16} />Sign out</button>
+      </div>
+      {message && <p className="notice" data-testid="platform-message">{message}</p>}
+      {inviteLink && <label>Owner invite
+        <input readOnly value={inviteLink} data-testid="platform-invite-link" onFocus={(event) => event.target.select()} />
+      </label>}
+      <div className="table-wrap">
+        <table className="data-table" data-testid="platform-shops">
+          <thead>
+            <tr><th>Shop</th><th>Status</th><th>Created</th><th>Users</th><th>Jobs</th><th>Last activity</th><th></th></tr>
+          </thead>
+          <tbody>
+            {shops.map((shop) => <tr key={shop.id} data-testid={`platform-shop-${shop.id}`}>
+              <td><strong>{shop.name}</strong><div className="tiny">{shop.slug}</div></td>
+              <td data-testid={`platform-status-${shop.id}`}>{shop.status}</td>
+              <td>{shop.created ? String(shop.created).slice(0, 10) : ""}</td>
+              <td>{shop.users}</td>
+              <td>{shop.jobs}</td>
+              <td>{shop.lastActivity ? String(shop.lastActivity).slice(0, 10) : ""}</td>
+              <td className="row-actions">
+                {shop.status !== "active" && <button type="button" className="button" disabled={busy} data-testid={`platform-approve-${shop.id}`} onClick={() => run(`platform/shops/${shop.id}/approve`)}>Approve</button>}
+                {shop.status === "active" && <button type="button" className="button" disabled={busy} data-testid={`platform-suspend-${shop.id}`} onClick={() => run(`platform/shops/${shop.id}/suspend`)}>Suspend</button>}
+              </td>
+            </tr>)}
+          </tbody>
+        </table>
+      </div>
+      <h2>Requests</h2>
+      <p className="muted">Turn a signup request into a shop. The owner receives an invite and chooses their own password.</p>
+      {!leads.length && <p data-testid="platform-leads-empty">No open requests.</p>}
+      {!!leads.length && <ul className="plain-list" data-testid="platform-leads">
+        {leads.map((lead) => <li key={lead.id} data-testid={`platform-lead-${lead.id}`}>
+          <span><strong>{lead.shop}</strong> · {lead.name} · {lead.email}{lead.city ? ` · ${lead.city}` : ""}</span>
+          <button type="button" className="button" disabled={busy} data-testid={`platform-create-shop-${lead.id}`} onClick={() => run(`platform/leads/${lead.id}/approve`, true)}>Create shop</button>
+        </li>)}
+      </ul>}
+    </main>
+  </div>;
 }
 
 function Studio() {
@@ -812,10 +1029,11 @@ function Studio() {
     }
   };
   useEffect(() => { api("auth").then(setAuth).catch((reason) => setError(reason.message)); }, []);
-  useEffect(() => { if (auth?.user && auth.user.role !== "superadmin") load(); }, [auth?.user]);
+  const shopOpen = !auth?.user?.shop_status || auth.user.shop_status === "active";
+  useEffect(() => { if (auth?.user && auth.user.role !== "superadmin" && shopOpen) load(); }, [auth?.user, shopOpen]);
   useEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
   useEffect(() => {
-    if (!auth?.user || view !== "jobs") return undefined;
+    if (!auth?.user || !shopOpen || auth.user.role === "superadmin" || view !== "jobs") return undefined;
     if (!jobId) {
       setJob(null);
       return undefined;
@@ -823,7 +1041,7 @@ function Studio() {
     let cancelled = false;
     api(`jobs/${jobId}`).then((detail) => { if (!cancelled) setJob(detail); }).catch((reason) => setError(reason.message));
     return () => { cancelled = true; };
-  }, [auth?.user, jobId, view]);
+  }, [auth?.user, jobId, view, shopOpen]);
   const reloadJob = async () => {
     const id = job?.id || jobId;
     if (!id) return;
@@ -836,12 +1054,20 @@ function Studio() {
     if (location.pathname !== "/login") return <Navigate to="/login" replace />;
     return <Auth auth={auth} onSignedIn={(user) => { setAuth({ user, needsSetup: false }); navigate("/jobs"); }} />;
   }
+  const signOut = async () => {
+    await api("auth/logout", { method: "POST", body: "{}" });
+    setAuth({ user: null, needsSetup: false });
+    navigate("/login");
+  };
   if (auth.user.role === "superadmin") {
-    return <div className="auth-shell" data-testid="platform-screen">
+    return <PlatformScreen onSignedOut={signOut} />;
+  }
+  if (!shopOpen) {
+    return <div className="auth-shell" data-testid="suspended-screen">
       <main className="auth-form">
-        <h2>Platform administrator</h2>
-        <p className="muted">This sign-in is not a shop workspace. Shop jobs, files, and settings stay inside each shop.</p>
-        <button className="primary wide" data-testid="platform-sign-out-button" onClick={async () => { await api("auth/logout", { method: "POST", body: "{}" }); setAuth({ user: null, needsSetup: false }); navigate("/login"); }}>Sign out</button>
+        <h2>This shop is suspended</h2>
+        <p className="muted">Sign-in is blocked until a platform administrator turns the shop back on. Job files stay in the shop.</p>
+        <button className="primary wide" data-testid="suspended-sign-out-button" onClick={signOut}>Sign out</button>
       </main>
     </div>;
   }

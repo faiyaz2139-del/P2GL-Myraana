@@ -30,6 +30,7 @@ TENANT_COLLECTIONS = frozenset({
     "assistant_leases",
     "sessions",
     "invites",
+    "password_resets",
 })
 
 _shop = ContextVar("myraana_shop", default=None)
@@ -210,6 +211,7 @@ def new_shop_records(*, shop_id, name, slug, email, owner_name, owner_id, passwo
             "name": name,
             "slug": slug,
             "created": created,
+            "status": "active",
             "billing": {"enabled": False, "provider": "stripe"},
         },
         "user": {
@@ -400,6 +402,10 @@ async def migrate_tenants(database):
         await raw.shops.update_one(
             {"_id": PRINT2GO_SHOP_ID, "billing": {"$exists": False}},
             {"$set": {"billing": {"enabled": False, "provider": "stripe"}}},
+        )
+        await raw.shops.update_one(
+            {"_id": PRINT2GO_SHOP_ID, "status": {"$exists": False}},
+            {"$set": {"status": "active"}},
         )
         for name in TENANT_COLLECTIONS:
             await raw[name].update_many(
