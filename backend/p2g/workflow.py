@@ -8,7 +8,7 @@ from motor.motor_asyncio import AsyncIOMotorGridFSBucket
 
 from p2g.core import AppError, db, lock, new_id, now, unlock
 from p2g.pdfcheck import PdfError, inspect, make_print_ready, prepare, render_page, verify
-from p2g.present import status_label
+from p2g.present import reset_result, status_label
 from p2g.account_access import SUSPENDED_MESSAGE, shop_allows_sign_in
 from p2g.membership import save_session, user_for_session
 from p2g.tenancy import (
@@ -130,11 +130,14 @@ def require_completed(job, through):
 
 def reset_from(job, index, reason):
     job["generation"] += 1
+    reached_any = False
     for item in job["tasks"][index:]:
+        result = reset_result(item, reason)
+        reached_any = reached_any or result == reason
         item.update(
             {
                 "status": "Pending",
-                "result": reason,
+                "result": result,
                 "next": "",
                 "finished": None,
                 "executions": [],
@@ -161,7 +164,8 @@ def reset_from(job, index, reason):
     if index <= 3:
         job.pop("bleedDecision", None)
         job.pop("bleedConfirmation", None)
-    record_event(job, reason)
+    if reached_any:
+        record_event(job, reason)
 
 
 def public(doc):

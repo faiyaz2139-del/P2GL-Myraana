@@ -1,6 +1,12 @@
 """Customer-facing job status. Proof approval must not keep saying it is waiting."""
 
 
+def reset_result(task, reason):
+    """Keep the initial text on a step the job has not reached."""
+    reached = task.get("status") != "Pending" or task.get("result") != "Not started."
+    return reason if reached else "Not started."
+
+
 def status_label(job):
     state = job.get("state")
     if state == "paused":

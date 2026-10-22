@@ -312,6 +312,14 @@ def normalise_stock_list(names):
     return found
 
 
+_CARDSTOCK = re.compile(r"\b\d+(?:\.\d+)?\s*-?\s*pt\b|\bcard|\bcover\b", re.IGNORECASE)
+
+
+def is_cardstock(name):
+    """Business cards print on cardstock: a pt weight, or a card or cover stock. Text weights never match."""
+    return bool(_CARDSTOCK.search(str(name or "")))
+
+
 def match_finish(finish, shop_stocks):
     text = str(finish or "").strip().lower()
     if "matte" in text or text == "matt":
@@ -322,7 +330,7 @@ def match_finish(finish, shop_stocks):
         return None
     for stock in shop_stocks or []:
         canon = normalise_stock_name(stock)
-        if needle in canon.lower():
+        if needle in canon.lower() and is_cardstock(canon):
             return canon
     return None
 
@@ -464,10 +472,37 @@ def _white_edges(document, bleed_in):
     return False
 
 
-def _edge_png(page, pad, dpi):
-    image = Image.open(io.BytesIO(page.get_pixmap(dpi=dpi, alpha=False).tobytes("png"))).convert("RGB")
+def _uses_cmyk(document, page):
+    """True when the page draws in CMYK, so the bleed is built in CMYK too and matches the art."""
+    try:
+        streams = [page.read_contents() or b""]
+        for xref, *_ in page.get_xobjects():
+            try:
+                streams.append(document.xref_stream(xref) or b"")
+            except Exception:
+                continue
+        for item in page.get_images(full=True):
+            if "CMYK" in str(item[5]).upper():
+                return True
+        for data in streams:
+            if b"DeviceCMYK" in data or re.search(rb"(?:^|\s)[kK](?:\s|$)", data):
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _edge_image(page, pad, dpi, cmyk=False):
+    """Page render with its outer pixel row and column repeated into a pad on every side."""
+    if cmyk:
+        pix = page.get_pixmap(dpi=dpi, alpha=False, colorspace=pymupdf.csCMYK)
+        image = Image.frombytes("CMYK", (pix.width, pix.height), pix.samples)
+        mode = "CMYK"
+    else:
+        image = Image.open(io.BytesIO(page.get_pixmap(dpi=dpi, alpha=False).tobytes("png"))).convert("RGB")
+        mode = "RGB"
     width, height = image.size
-    canvas = Image.new("RGB", (width + 2 * pad, height + 2 * pad))
+    canvas = Image.new(mode, (width + 2 * pad, height + 2 * pad))
     canvas.paste(image, (pad, pad))
     left = image.crop((0, 0, 1, height)).resize((pad, height))
     right = image.crop((width - 1, 0, width, height)).resize((pad, height))
@@ -484,11 +519,24 @@ def _edge_png(page, pad, dpi):
         ((width - 1, height - 1), (width + pad, height + pad)),
     )
     for origin, position in corners:
-        tile = Image.new("RGB", (pad, pad), image.getpixel(origin))
+        tile = Image.new(mode, (pad, pad), image.getpixel(origin))
         canvas.paste(tile, position)
+    return canvas
+
+
+def _edge_png(page, pad, dpi):
     buffer = io.BytesIO()
-    canvas.save(buffer, format="PNG")
+    _edge_image(page, pad, dpi).save(buffer, format="PNG")
     return buffer.getvalue()
+
+
+def _insert_edge(new_page, document, page, pad, dpi):
+    if _uses_cmyk(document, page):
+        canvas = _edge_image(page, pad, dpi, cmyk=True)
+        pixmap = pymupdf.Pixmap(pymupdf.csCMYK, canvas.width, canvas.height, canvas.tobytes(), False)
+        new_page.insert_image(new_page.rect, pixmap=pixmap)
+    else:
+        new_page.insert_image(new_page.rect, stream=_edge_png(page, pad, dpi))
 
 
 def extend_document(document, bleed_in, target_w, target_h):
@@ -500,7 +548,7 @@ def extend_document(document, bleed_in, target_w, target_h):
             src_w = float(page.rect.width)
             src_h = float(page.rect.height)
             new_page = produced.new_page(width=target_w * PT, height=target_h * PT)
-            new_page.insert_image(new_page.rect, stream=_edge_png(page, pad, 300))
+            _insert_edge(new_page, document, page, pad, 300)
             x = (new_page.rect.width - src_w) / 2
             y = (new_page.rect.height - src_h) / 2
             dest = pymupdf.Rect(x, y, x + src_w, y + src_h)
