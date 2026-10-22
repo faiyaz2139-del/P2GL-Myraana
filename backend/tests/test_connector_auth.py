@@ -1,10 +1,17 @@
 """Connector credentials stay with the shop that paired them."""
 import asyncio
 
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
 from p2g.connector_auth import (
+    connector_presence,
     credential_hash,
     legacy_credential_hash,
     legacy_shared_secret_shop,
+    list_open_pairings,
+    manual_approval_required,
+    newest_found_pairing,
     select_device,
 )
 from p2g.tenancy import PRINT2GO_SHOP_ID, TenantDatabase, TenantScopeError, shop_scope
@@ -146,3 +153,96 @@ async def _pairing_created_for_one_shop_is_hidden_from_another():
         })
         listed = await database.connector_pairings.find({}).to_list(10)
         assert [row["_id"] for row in listed] == ["pair-b"]
+
+
+def test_connector_stays_online_until_ninety_seconds():
+    at = datetime(2026, 10, 22, 21, 53, tzinfo=timezone.utc)
+    fresh = (at - timedelta(seconds=90)).isoformat()
+    stale = (at - timedelta(seconds=91)).isoformat()
+    assert connector_presence(fresh, True, at) == "Connected"
+    assert connector_presence(stale, True, at) == "Offline"
+    assert connector_presence(fresh, False, at) == "Offline"
+    assert connector_presence("", True, at) == "Offline"
+
+
+def test_fresh_same_computer_does_not_need_a_manual_approve():
+    at = datetime(2026, 10, 22, 22, 14, tzinfo=timezone.utc)
+    created = (at - timedelta(seconds=30)).isoformat()
+    edge = (at - timedelta(minutes=2)).isoformat()
+    older = (at - timedelta(minutes=2, seconds=1)).isoformat()
+    assert manual_approval_required(created, "device-p2gl-2", [], at) is False
+    assert manual_approval_required(created, "device-p2gl-2", ["device-p2gl-2"], at) is False
+    assert manual_approval_required(edge, "device-p2gl-2", ["device-p2gl-2"], at) is False
+    assert manual_approval_required(created, "other-device", ["device-p2gl-2"], at) is True
+    assert manual_approval_required(older, "device-p2gl-2", ["device-p2gl-2"], at) is True
+    assert manual_approval_required(older, "new-device", [], at) is True
+
+
+def test_expired_found_pairing_is_not_the_approve_target():
+    asyncio.run(_expired_found_pairing_is_not_the_approve_target())
+
+
+async def _expired_found_pairing_is_not_the_approve_target():
+    """Live shop: 3e6fe8ac was still Found after 22:08, and 70125725 was the fresh claim."""
+    import test_tenancy
+
+    collection = test_tenancy.MemoryDB().connector_pairings
+    await collection.insert_one({
+        "_id": "3e6fe8ac",
+        "status": "Found",
+        "expires_at": "2026-10-22T22:08:00+00:00",
+        "created_at": "2026-10-22T21:58:00+00:00",
+        "code_hash": "secret-old",
+        "claim_hash": "claim-old",
+        "inventory": {"hostname": "P2GL-2"},
+    })
+    await collection.insert_one({
+        "_id": "70125725",
+        "status": "Found",
+        "expires_at": "2026-10-22T22:23:00+00:00",
+        "created_at": "2026-10-22T22:13:00+00:00",
+        "code_hash": "secret-new",
+        "claim_hash": "claim-new",
+        "device_id": "device-p2gl-2",
+        "inventory": {"hostname": "P2GL-2"},
+    })
+    await collection.insert_one({
+        "_id": "still-searching",
+        "status": "Searching",
+        "expires_at": "2026-10-22T22:20:00+00:00",
+        "created_at": "2026-10-22T22:10:00+00:00",
+        "code_hash": "secret-search",
+    })
+    await collection.insert_one({
+        "_id": "search-old",
+        "status": "Searching",
+        "expires_at": "2026-10-22T22:00:00+00:00",
+        "created_at": "2026-10-22T21:50:00+00:00",
+        "code_hash": "secret-stale",
+    })
+    rows = await list_open_pairings(collection, "2026-10-22T22:13:30+00:00")
+    assert [row["id"] for row in rows] == ["70125725", "still-searching"]
+    assert "code_hash" not in rows[0]
+    assert "claim_hash" not in rows[0]
+    target = newest_found_pairing(rows)
+    assert target["id"] == "70125725"
+    assert target["id"] != "3e6fe8ac"
+    stored = {doc["_id"]: doc["status"] for doc in collection.docs}
+    assert stored["3e6fe8ac"] == "Expired"
+    assert stored["search-old"] == "Expired"
+    assert stored["70125725"] == "Found"
+    assert stored["still-searching"] == "Searching"
+    pairing_source = Path(__file__).resolve().parents[1] / "p2g" / "connector_pairing.py"
+    text = pairing_source.read_text(encoding="utf-8")
+    assert "list_open_pairings(" in text
+    assert 'record["status"] = connector_presence(' in text
+    app = Path(__file__).resolve().parents[2] / "frontend" / "src" / "App.js"
+    ui = app.read_text(encoding="utf-8")
+    assert "PAIRING_POLL_MS = 3000" in ui
+    assert "newestFoundPairing" in ui
+    assert "approve(item.id)" in ui
+    assert "connector-approve-error" in ui
+    assert "Open MyraanaConnector on " in ui
+    assert "It runs in the tray." in ui
+    assert "Connected to ${host}" in ui
+    assert "pairings[0]" not in ui

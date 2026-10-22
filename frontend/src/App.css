@@ -51,3 +51,5 @@ img.brand-mark{width:40px;height:40px;border-radius:11px;background:transparent;
 .history-details>summary{padding:14px 16px;cursor:pointer;color:var(--muted);font-weight:600}
 .history-details:not([open]) > :not(summary){display:none}
 .history-details .tasks-section{margin:0;padding:0 16px 16px}
+.pending-claim{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:16px 0}
+.pending-claim .approve-claim{font-size:18px;padding:14px 28px;min-width:160px}

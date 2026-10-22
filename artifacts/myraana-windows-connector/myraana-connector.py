@@ -220,6 +220,15 @@ def exercise_bundled_modules():
     return discovery, fiery
 
 
+def exercise_tray_support():
+    """Import the tray libraries. The frozen Windows exe must include both."""
+    import pystray
+    from PIL import Image
+    if not hasattr(pystray, "Icon") or not hasattr(Image, "new"):
+        raise RuntimeError("Tray support is unavailable.")
+    return pystray
+
+
 def perform_holds(api_url, credential, result, opener=None):
     """Submit queued PRINT_READY files to HOLD. A failure is reported, never printed."""
     holds = result.get("holds") if isinstance(result, dict) else None
@@ -261,6 +270,137 @@ def perform_holds(api_url, credential, result, opener=None):
     return reports or None
 
 
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_VALUE = "MyraanaConnector"
+TRAY_MENU = ("Open", "Scan again", "Start with Windows", "Quit")
+
+
+def launch_command():
+    """How Windows should start this connector. A per-user path, no admin."""
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
+    return f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+
+
+def _winreg():
+    if platform.system() != "Windows":
+        return None
+    try:
+        import winreg
+    except ImportError:
+        return None
+    return winreg
+
+
+def set_startup(enabled, registry=None):
+    """Per-user Run key. HKCU does not need an administrator."""
+    registry = _winreg() if registry is None else registry
+    if registry is None:
+        return False
+    with registry.CreateKey(registry.HKEY_CURRENT_USER, RUN_KEY) as key:
+        if enabled:
+            registry.SetValueEx(key, RUN_VALUE, 0, registry.REG_SZ, launch_command())
+        else:
+            try:
+                registry.DeleteValue(key, RUN_VALUE)
+            except OSError:
+                return False
+    return True
+
+
+def startup_enabled(registry=None):
+    registry = _winreg() if registry is None else registry
+    if registry is None:
+        return False
+    try:
+        with registry.OpenKey(registry.HKEY_CURRENT_USER, RUN_KEY) as key:
+            value, _kind = registry.QueryValueEx(key, RUN_VALUE)
+    except OSError:
+        return False
+    return bool(str(value or "").strip())
+
+
+def ensure_default_startup(state, registry=None):
+    """After a pairing, start with Windows unless the operator turned it off."""
+    if state.get("startWithWindows") is False:
+        return False
+    state["startWithWindows"] = True
+    save_state(state)
+    set_startup(True, registry=registry)
+    return True
+
+
+def remember_startup(state, enabled, registry=None):
+    state["startWithWindows"] = bool(enabled)
+    save_state(state)
+    set_startup(bool(enabled), registry=registry)
+    return state["startWithWindows"]
+
+
+def should_reconnect(state, credential, pairing_code):
+    """A paired computer opens straight into the heartbeat. No code is asked again."""
+    return bool(not normalize_code(pairing_code) and (state or {}).get("websiteUrl") and credential)
+
+
+def handle_window_close(root, stop, self_test=False):
+    """Closing the window keeps heartbeats running. Quit is the tray action that stops them."""
+    if self_test:
+        stop.set()
+        root.destroy()
+        return "quit"
+    root.withdraw()
+    return "hide"
+
+
+def quit_connector(root, stop, icon=None):
+    stop.set()
+    if icon is not None:
+        try:
+            icon.stop()
+        except Exception:
+            pass
+    try:
+        root.destroy()
+    except Exception:
+        pass
+
+
+def tray_image():
+    from PIL import Image, ImageDraw
+    image = Image.new("RGB", (64, 64), "#12315c")
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((8, 8, 56, 56), fill="#2f6fed")
+    return image
+
+
+def build_tray_menu(pystray, actions):
+    return pystray.Menu(
+        pystray.MenuItem("Open", actions["open"], default=True),
+        pystray.MenuItem("Scan again", actions["scan"]),
+        pystray.MenuItem(
+            "Start with Windows",
+            actions["toggle_startup"],
+            checked=lambda item: actions["startup_checked"](),
+        ),
+        pystray.MenuItem("Quit", actions["quit"]),
+    )
+
+
+def start_tray(root, actions):
+    try:
+        import pystray
+    except ImportError:
+        return None
+    try:
+        image = tray_image()
+        menu = build_tray_menu(pystray, actions)
+    except Exception:
+        return None
+    icon = pystray.Icon("MyraanaConnector", image, "Myraana Connector", menu)
+    threading.Thread(target=icon.run, name="myraana-tray", daemon=True).start()
+    return icon
+
+
 def website_url(value):
     value = value.strip().rstrip("/")
     parsed = urllib.parse.urlsplit(value)
@@ -271,8 +411,9 @@ def website_url(value):
     return value
 
 
-def run(url=None, code=None, report=print, stop=None):
+def run(url=None, code=None, report=print, stop=None, scan_now=None):
     stop = stop or threading.Event()
+    scan_now = scan_now or threading.Event()
     state = load_state()
     state.setdefault("deviceId", str(uuid.uuid4()))
     url = website_url(url or os.environ.get("MYRAANA_URL", "")
@@ -301,14 +442,31 @@ def run(url=None, code=None, report=print, stop=None):
         credential = None
         state.pop("pairingId", None)
         save_state(state)
+    startup_ready = False
+
+    def arm_startup():
+        nonlocal startup_ready
+        if startup_ready:
+            return
+        startup_ready = True
+        ensure_default_startup(state)
+
+    if credential:
+        arm_startup()
     while not stop.is_set():
         try:
             if credential:
+                forced = scan_now.is_set()
+                scan_now.clear()
                 found = inventory()
-                result = request(api_url, "/connector-devices/heartbeat",
-                                 {"inventory": found}, credential)
+                body = {"inventory": found}
+                if forced:
+                    body["scanned"] = True
+                result = request(api_url, "/connector-devices/heartbeat", body, credential)
                 report(f"Connected. {len(found.get('printers') or [])} printer(s) found.")
-                if isinstance(result, dict) and result.get("scan"):
+                if forced:
+                    report("Scanned again for printers.")
+                elif isinstance(result, dict) and result.get("scan"):
                     found = inventory()
                     result = request(api_url, "/connector-devices/heartbeat",
                             {"inventory": found, "scanned": True}, credential)
@@ -337,6 +495,7 @@ def run(url=None, code=None, report=print, stop=None):
                     credential = secret("credential", result["credential"])
                     state.pop("pairingId", None)
                     save_state(state)
+                    arm_startup()
                     report("Approved. Checking connection...")
             stop.wait(8)
         except urllib.error.HTTPError as error:
@@ -370,6 +529,7 @@ def run(url=None, code=None, report=print, stop=None):
 def setup_window(self_test=False):
     if self_test:
         exercise_bundled_modules()
+        exercise_tray_support()
     import tkinter as tk
     from tkinter import ttk
 
@@ -398,7 +558,7 @@ def setup_window(self_test=False):
 
     def work(address, pairing_code):
         try:
-            run(address, pairing_code, lambda message: events.put(("status", message)), stop)
+            run(address, pairing_code, lambda message: events.put(("status", message)), stop, scan_now)
         except Exception as error:
             message = str(error) if isinstance(error, (ValueError, RuntimeError)) else "Setup could not complete. Check your connection and try again."
             events.put(("error", message))
@@ -426,6 +586,8 @@ def setup_window(self_test=False):
     button.pack(anchor="w", pady=(0, 12))
     ttk.Label(frame, textvariable=status, wraplength=500).pack(anchor="w")
     ttk.Label(frame, text=HOLD_FOOTER, wraplength=500).pack(anchor="w", pady=(16, 0))
+    scan_now = threading.Event()
+    icon = {"current": None}
 
     def poll():
         try:
@@ -441,17 +603,58 @@ def setup_window(self_test=False):
             pass
         root.after(200, poll)
 
+    def show_window():
+        root.deiconify()
+        try:
+            root.lift()
+        except Exception:
+            pass
+
+    def saved_credential():
+        try:
+            return secret("credential")
+        except Exception:
+            return None
+
     def close():
-        stop.set()
-        root.destroy()
+        if self_test or icon["current"] is None:
+            quit_connector(root, stop, icon["current"])
+            return
+        handle_window_close(root, stop)
+
+    def startup_checked():
+        current = load_state()
+        if "startWithWindows" in current:
+            return bool(current.get("startWithWindows"))
+        return startup_enabled()
+
+    tray_actions = {
+        "open": lambda _icon, _item: root.after(0, show_window),
+        "scan": lambda _icon, _item: request_scan(),
+        "toggle_startup": lambda _icon, _item: root.after(0, toggle_startup),
+        "quit": lambda _icon, _item: root.after(0, lambda: quit_connector(root, stop, icon["current"])),
+        "startup_checked": startup_checked,
+    }
+
+    def request_scan():
+        scan_now.set()
+        root.after(0, lambda: status.set("Scanning again for printers."))
+
+    def toggle_startup():
+        current = load_state()
+        remember_startup(current, not startup_checked())
+        status.set("Start with Windows is on." if current.get("startWithWindows") else "Start with Windows is off.")
 
     root.protocol("WM_DELETE_WINDOW", close)
     if self_test:
-        # Discovery and Fiery HOLD were loaded above. Close the window without connecting.
+        # Discovery, Fiery HOLD, and tray support were loaded above. Close without connecting.
         root.update()
         root.after(100, close)
     else:
+        icon["current"] = start_tray(root, tray_actions)
         poll()
+        if should_reconnect(load_state(), saved_credential(), code.get()):
+            root.after(200, connect)
     root.mainloop()
 
 

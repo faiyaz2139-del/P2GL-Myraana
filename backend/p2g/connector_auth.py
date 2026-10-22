@@ -6,8 +6,15 @@ is the shop the shared secret was installed for.
 """
 import hashlib
 import hmac
+from datetime import datetime, timedelta, timezone
 
 from p2g.tenancy import PRINT2GO_SHOP_ID, bound_shop
+
+
+# A paired computer stays Connected until this long after its last heartbeat.
+OFFLINE_AFTER = timedelta(seconds=90)
+# The admin who just created a code is still on Shop settings during this window.
+AUTO_APPROVE_WITHIN = timedelta(minutes=2)
 
 
 def credential_hash(value):
@@ -75,6 +82,102 @@ def build_pairing_document(user, *, pairing_id, code_hash, expires_at, created_a
         "created_at": created_at,
         "shop_id": shop_id,
     }
+
+
+def _as_utc(value):
+    if isinstance(value, datetime):
+        moment = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
+
+
+def connector_presence(last_seen, enabled=True, at=None):
+    """Connected while a heartbeat is at most 90 seconds old. Otherwise Offline."""
+    if not enabled:
+        return "Offline"
+    moment = _as_utc(at) or datetime.now(timezone.utc)
+    seen = _as_utc(last_seen)
+    if seen is None or moment - seen > OFFLINE_AFTER:
+        return "Offline"
+    return "Connected"
+
+
+def manual_approval_required(created_at, device_id, existing_device_ids, at=None):
+    """A click is required once the code is older than 2 minutes, or the computer is new.
+
+    A shop with no connector yet, or the same device id pairing again, can be
+    approved by the browser session that is waiting on the fresh code.
+    """
+    moment = _as_utc(at) or datetime.now(timezone.utc)
+    created = _as_utc(created_at)
+    if created is None or moment - created > AUTO_APPROVE_WITHIN:
+        return True
+    known = [str(item) for item in (existing_device_ids or []) if item]
+    if known and str(device_id or "") not in known:
+        return True
+    return False
+
+
+def newest_found_pairing(records):
+    """The Found pairing Approve should use. Newest created_at wins."""
+    found = [record for record in records or [] if record.get("status") == "Found" and (record.get("id") or record.get("_id"))]
+    found.sort(key=lambda record: str(record.get("created_at") or ""), reverse=True)
+    return found[0] if found else None
+
+
+def _pairing_expired(record, at):
+    moment = _as_utc(at) or datetime.now(timezone.utc)
+    expires = _as_utc((record or {}).get("expires_at"))
+    if expires is None:
+        return True
+    return expires <= moment
+
+
+async def list_open_pairings(collection, at):
+    """Mark stale Searching and Found codes Expired, then return the live ones, newest first.
+
+    An expired Found row must not stay in the list. Approve on that row returns
+    409, which is what made the Shop settings button look broken.
+    """
+    moment = (_as_utc(at) or datetime.now(timezone.utc)).isoformat()
+    for _ in range(20):
+        records = await collection.find({"status": {"$in": ["Searching", "Found"]}}).to_list(100)
+        stale = [
+            record["_id"]
+            for record in records
+            if record.get("_id") and _pairing_expired(record, moment)
+        ]
+        if not stale:
+            break
+        result = await collection.update_many(
+            {"_id": {"$in": stale}},
+            {"$set": {"status": "Expired"}},
+        )
+        if not getattr(result, "modified_count", 0):
+            break
+        if len(records) < 100:
+            break
+    records = await collection.find(
+        {"status": {"$in": ["Searching", "Found"]}},
+        {"code_hash": 0, "claim_hash": 0},
+    ).to_list(100)
+    visible = []
+    for record in records:
+        if _pairing_expired(record, moment):
+            continue
+        record["id"] = record.pop("_id", None) or record.get("id")
+        visible.append(record)
+    visible.sort(key=lambda record: str(record.get("created_at") or ""), reverse=True)
+    return visible[:20]
 
 
 def shop_for_connected_pairing(pairing):
