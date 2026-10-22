@@ -17,7 +17,7 @@ from p2g.connector_auth import (
     shop_for_connected_pairing,
 )
 from p2g.core import AppError, db, new_id, now
-from p2g.fiery_hold import interpret_hold_report
+from p2g.fiery_hold import hold_method_label, interpret_hold_report, job_label
 from p2g.printer_discovery import normalise_reported, preferred_printer, scan_is_due
 from p2g.printers import filter_printers
 from p2g.tenancy import PRINT2GO_SHOP_ID, bound_shop, current_shop_id, shop_scope, unscoped
@@ -190,15 +190,21 @@ async def _record_holds(reports, settings):
             job["fieryHold"] = hold
             # Readiness and authorize already moved the job past the handoff.
             # Recording the hold must not send that job back to step 10.
+            note = (
+                f"PRINT_READY is on the Fiery HOLD queue via {hold_method_label(interpreted['method'])}. "
+                "It was not printed."
+            )
             past_handoff = job["tasks"][10]["status"] == "Completed"
             if past_handoff:
                 job.pop("productionStop", None)
                 if job["tasks"][11]["status"] == "Completed":
+                    update_task(job, 11, "Completed", note, AUTO_ACTOR)
+                if len(job["tasks"]) > 12 and job["tasks"][12]["status"] != "Completed":
                     update_task(
                         job,
-                        11,
-                        "Completed",
-                        "PRINT_READY is on the Fiery HOLD queue. It was not printed.",
+                        12,
+                        "Waiting for operator",
+                        f"{note} Confirm only after physical sheets print.",
                         AUTO_ACTOR,
                     )
             else:
@@ -211,11 +217,19 @@ async def _record_holds(reports, settings):
                     pending = next((step for step in job.get("productionChecklist") or [] if step.get("status") != "done"), None)
                     title = pending["title"] if pending else "Load Duplo DC-618 job no. 2."
                     update_task(job, 9, "Waiting for operator", title, AUTO_ACTOR)
-            record_event(job, "PRINT_READY is on the Fiery hold queue. It was not printed.", AUTO_ACTOR)
+            record_event(job, note, AUTO_ACTOR)
         else:
-            hold.update({"status": "failed", "held": False, "printed": False, "error": interpreted["error"]})
+            hold.update({
+                "status": "failed",
+                "held": False,
+                "printed": False,
+                "method": interpreted.get("method") or "",
+                "error": interpreted["error"],
+            })
             job["fieryHold"] = hold
-            message = hold_failure_message(interpreted["error"])
+            message = interpreted["error"]
+            if "Nothing was printed" not in message and "stays on HOLD" not in message:
+                message = hold_failure_message(message)
             job["productionStop"] = message
             if job["tasks"][10]["status"] == "Completed":
                 update_task(job, 11, "Needs attention", message, AUTO_ACTOR)
@@ -245,7 +259,7 @@ async def _pending_holds(settings, inventory, device_id=None):
         hot = str(folders[0].get("path") or "")[:300]
     queued = await db.jobs.find(
         exclude_archived(query),
-        {"_id": 0, "id": 1, "cardRoute": 1, "finish": 1, "stock": 1, "fieryHold": 1},
+        {"_id": 0, "id": 1, "customer": 1, "cardRoute": 1, "finish": 1, "stock": 1, "fieryHold": 1},
     ).to_list(5)
     outgoing = []
     for job in queued:
@@ -255,6 +269,7 @@ async def _pending_holds(settings, inventory, device_id=None):
         outgoing.append(
             {
                 "jobId": job.get("id"),
+                "jobName": job_label(job.get("customer"), job.get("id"), name),
                 "filename": name,
                 "preset": "London BC",
                 "stock": job.get("finish") or job.get("stock") or "",
