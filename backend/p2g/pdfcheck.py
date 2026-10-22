@@ -9,10 +9,9 @@ from pypdf.generic import ContentStream
 
 PT = 72.0
 LIMITS = (
-    "Font-embedding checks cover fonts referenced by page text. Image measurements cover placed raster images "
-    "found by the renderer. Nested forms, masks, vector logos, transparency and overprint need visual review. "
-    "Colour operators are reported as found; no colour conversion is applied and colour suitability is not "
-    "certified. Text bounds come from the text extractor and are approximate. This is not a certified PDF/X preflight."
+    "This check looks at page size, fonts, placed images, and colour. "
+    "It does not certify PDF/X, transparency, or overprint. "
+    "Look at the proof before you approve."
 )
 
 
@@ -71,14 +70,22 @@ def inspect(data, r, sides):
     n = len(reader.pages)
     max_pages = int(r.get("maxPages") or 2)
     if n != sides:
-        errors.append(f"Expected {sides} page(s), found {n}. Upload one PDF with the front, then the back.")
+        errors.append(
+            f"This job needs {sides} page(s), and this file has {n}. "
+            "Export one PDF with the front first, then the back if the job is double-sided, and upload it again."
+        )
     if n > max_pages:
-        errors.append(f"This job supports at most {max_pages} PDF page(s).")
+        errors.append(
+            f"This file has {n} pages. This job allows {max_pages}. "
+            "Export a PDF with only the front and, if needed, the back."
+        )
     try:
         if reader.get_fields():
-            errors.append("Interactive form fields must be flattened by the artwork designer before upload.")
+            errors.append(
+                "This PDF still has form fields. Flatten them in the design app, then upload the PDF again."
+            )
     except Exception:
-        warnings.append("Form field structure could not be read; review the proof carefully.")
+        warnings.append("The form fields could not be read. Open the proof and confirm the page looks finished.")
     fw, fh = (r["width"] + 2 * r["bleed"]) * PT, (r["height"] + 2 * r["bleed"]) * PT
     tw, th = r["width"] * PT, r["height"] * PT
     bleed = "correct"
@@ -89,20 +96,29 @@ def inspect(data, r, sides):
         full, trim = close(w, fw) and close(h, fh), close(w, tw) and close(h, th)
         if not full and not trim:
             errors.append(
-                f"Page {i+1}: {w/PT:.3f} × {h/PT:.3f} inches does not match the finished size. No stretching is allowed."
+                f"Page {i+1} is {w/PT:.3f} × {h/PT:.3f} inches, which does not match the finished size "
+                f"of {r['width']:.3f} × {r['height']:.3f} inches plus {r['bleed']:.3f} inch bleed. "
+                "Export the PDF at that size and upload it again. Myraana will not stretch it."
             )
             bleed = "unsuitable"
         elif trim and bleed != "unsuitable":
             bleed = "missing"
         if int(p.get("/Rotate", 0) or 0) % 360 != 0:
-            errors.append(f"Page {i+1}: rotated page. Export an unrotated PDF.")
+            errors.append(
+                f"Page {i+1} is rotated. Export the PDF with rotation set to zero, then upload it again."
+            )
         annots = p.get("/Annots")
         if annots is not None and len(annots.get_object()) > 0:
-            errors.append(f"Page {i+1}: annotations detected. Flatten comments, links and annotations before upload.")
+            errors.append(
+                f"Page {i+1} still has comments or links. Flatten them in the design app, then upload the PDF again."
+            )
         boxes = {name: _box(p, name) for name in ("MediaBox", "CropBox", "BleedBox", "TrimBox", "ArtBox")}
         cb = boxes["CropBox"]["box"]
         if boxes["CropBox"]["explicit"] and [round(v, 1) for v in cb] != [round(float(v), 1) for v in mb]:
-            warnings.append(f"Page {i+1}: CropBox differs from MediaBox; the prepared file resets boxes to the recipe.")
+            warnings.append(
+                f"Page {i+1} has a crop box that does not match the page. "
+                "The prepared file resets the boxes to this job. Check the proof."
+            )
         offset, safe = (r["bleed"] * PT if full else 0.0), r["safe"] * PT
         unsafe, used_fonts = [], set()
         for block in mp.get_text("dict")["blocks"]:
@@ -121,7 +137,11 @@ def inspect(data, r, sides):
                     if x0 < offset + safe or y0 < offset + safe or x1 > w - offset - safe or y1 > h - offset - safe:
                         unsafe.append({"text": span["text"][:40], "bounds": [round(v, 2) for v in span["bbox"]]})
         if unsafe:
-            errors.append(f"Page {i+1}: {len(unsafe)} text span(s) detected inside the protected safe margin. Move essential text inward and upload a revised PDF.")
+            errors.append(
+                f"Page {i+1}: {len(unsafe)} text span(s) sit inside the protected safe margin "
+                f"({r['safe']:.3f} inches inside the trim). "
+                "Move essential text inward and upload a revised PDF."
+            )
         fonts = []
         for xref, ext, ftype, basefont, name, *_ in mp.get_fonts(full=True):
             base = (basefont or "").split("+")[-1]
@@ -129,7 +149,10 @@ def inspect(data, r, sides):
             used = base in used_fonts
             fonts.append({"name": basefont, "type": ftype, "embedded": embedded, "used": used})
             if used and not embedded:
-                errors.append(f"Page {i+1}: font {base} is not embedded. Embed fonts or outline text before uploading.")
+                errors.append(
+                    f"Page {i+1}: font {base} is not embedded. "
+                    "Embed the font or convert the text to outlines, then upload the PDF again."
+                )
         images = []
         for info in mp.get_image_info():
             x0, y0, x1, y1 = info["bbox"]
@@ -141,11 +164,15 @@ def inspect(data, r, sides):
                 if dpi < float(r["minDpi"]) - 0.5:
                     errors.append(
                         f"Page {i+1}: an image measures {dpi:.0f} dpi at its placed size; "
-                        f"minimum is {r['minDpi']} dpi. Replace it with higher-resolution artwork."
+                        f"minimum is {r['minDpi']} dpi. "
+                        "Replace it with a higher-resolution image and upload the PDF again."
                     )
         forms = [x for x in mp.get_xobjects()]
         if forms:
-            warnings.append(f"Page {i+1}: {len(forms)} form XObject(s) (nested content). Text and images inside were traced, but nested artwork needs visual review.")
+            warnings.append(
+                f"Page {i+1} has {len(forms)} grouped object(s). "
+                "Text and images inside were checked. Open the proof and look at that artwork before you approve."
+            )
         pages.append({
             "page": i + 1, "widthInches": round(w / PT, 4), "heightInches": round(h / PT, 4), "boxes": boxes,
             "rotation": int(p.get("/Rotate", 0) or 0), "fonts": fonts, "images": images, "unsafeText": unsafe,
@@ -154,14 +181,17 @@ def inspect(data, r, sides):
     doc.close()
     warnings.append(LIMITS)
     if bleed == "correct":
-        warnings.append("Page size includes bleed. This cannot prove the design extends to every bleed edge; confirm visually.")
+        warnings.append(
+            "The page includes bleed. Myraana cannot prove the design reaches every bleed edge. "
+            "Look at the proof and confirm the background extends past the trim."
+        )
     colour = _colour_check(pages, r, errors, warnings)
     raster = r.get("rasterTextDpi")
     if raster and float(raster) > float(r["minDpi"]):
         warnings.append(
-            f"Shop rule: rasterized text and logos should be {int(float(raster))} dpi. "
-            f"Placed images are blocked below {int(r['minDpi'])} dpi. "
-            "Photos and logos are not distinguished automatically."
+            f"Raster text and logos should be {int(float(raster))} dpi. "
+            f"Photos below {int(r['minDpi'])} dpi are blocked. "
+            "Myraana cannot tell a logo from a photo, so check logos on the proof."
         )
     errors = list(dict.fromkeys(errors))
     warnings = list(dict.fromkeys(warnings))
@@ -170,12 +200,12 @@ def inspect(data, r, sides):
         if "page(s)" in error:
             actions.append("Export the front and back as one PDF with the required page count.")
         elif "does not match the finished size" in error or "does not match the recipe" in error:
-            actions.append("Export at the exact finished size plus bleed; do not scale artwork in Myraana.")
+            actions.append("Export at the exact finished size plus bleed. Myraana will not scale the artwork.")
         elif "safe margin" in error:
             actions.append("Move essential text and logos inward, then upload a revised PDF.")
         elif "not embedded" in error:
             actions.append("Embed fonts or convert approved text to outlines before export.")
-        elif "annotations" in error:
+        elif "annotations" in error or "comments or links" in error:
             actions.append("Flatten comments, links, and annotations before export.")
         elif "dpi at its placed size" in error:
             actions.append("Replace low-resolution images with artwork meeting the recipe minimum DPI at final print size.")
@@ -209,17 +239,20 @@ def _colour_check(pages, recipe, errors, warnings):
         warnings.append("No colour operators were found. Colour mode was not certified.")
     elif expected == "CMYK" and "DeviceRGB" in found:
         message = (
-            "Colour operators include DeviceRGB. This shop expects CMYK. "
-            "RGB uploads are not converted to CMYK here."
+            "This file uses RGB colour (DeviceRGB). This shop prints CMYK. "
+            "RGB uploads are not converted to CMYK here. "
         )
         if policy == "reject":
-            errors.append(message)
+            errors.append(message + "Export the file as CMYK, or ask an admin to allow RGB with a warning.")
             status = "fail"
         else:
-            warnings.append(message + " The file is accepted with a warning.")
+            warnings.append(message + "The file is accepted with a warning. Check the colours on the proof.")
             status = "warn"
     if recipe.get("allowSpotColours", True) and any("Separation" in item or "DeviceN" in item for item in found):
-        warnings.append("Spot or DeviceN colour was found. Confirm Pantone separations. No colour conversion is applied.")
+        warnings.append(
+            "A Pantone or other spot colour is in this file. "
+            "Confirm it separates the way you expect. Myraana does not convert it."
+        )
     return {"expected": expected, "found": found, "status": status, "rgbPolicy": policy}
 
 
@@ -296,7 +329,11 @@ def render_page(data, index, dpi=150):
     doc = pymupdf.open(stream=data, filetype="pdf")
     try:
         if index < 0 or index >= doc.page_count:
-            raise PdfError("Page not found.")
-        return doc[index].get_pixmap(dpi=dpi).tobytes("png")
+            raise PdfError("That page is not in the file. Refresh the proof and try again.")
+        page = doc[index]
+        long_inches = max(float(page.rect.width), float(page.rect.height)) / PT
+        if long_inches > 0:
+            dpi = min(int(dpi), max(36, int(1400 / long_inches)))
+        return page.get_pixmap(dpi=dpi).tobytes("png")
     finally:
         doc.close()

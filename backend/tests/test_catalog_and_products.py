@@ -72,6 +72,20 @@ def test_catalog_counts_and_priority_presets():
     assert any(size["width"] == 2.5 and size["height"] == 2.5 for size in card["sizes"])
 
 
+def test_doubled_inch_marks_and_page_ranges_parse():
+    from p2g.catalog_seed import parse_size_range
+
+    sizes, skipped = parse_sizes(["24'' x 48''"])
+    assert not skipped
+    assert sizes[0]["width"] == 24 and sizes[0]["height"] == 48 and sizes[0]["unit"] == "in"
+    ranged = parse_size_range(['Size Range: 1" up to 60"'])
+    assert ranged["width_min"] == 1 and ranged["width_max"] == 60 and ranged["unit"] == "in"
+    die = next(item for item in load_presets()["presets"] if item["name"] == "Die-Cut Stickers")
+    assert die["customSize"]["width_min"] == 1 and die["customSize"]["width_max"] == 60
+    giant = next(item for item in load_presets()["presets"] if item["name"] == "Giant Cheques")
+    assert any(size["width"] == 24 and size["height"] == 48 for size in giant["sizes"])
+
+
 def test_curly_quotes_and_circle_sizes_parse():
     sizes, skipped = parse_sizes(['Standard Size: 5.5” x 8.5” or 8.5” x 11”', "1” Circle - 48 Labels / Sheet"])
     assert not skipped

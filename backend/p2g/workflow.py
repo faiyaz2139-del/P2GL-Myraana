@@ -389,7 +389,9 @@ async def run_pdf_workflow(job, actor, execution=None, token=None):
                     job,
                     3,
                     "Needs attention",
-                    "Artwork is trim size only. Choose corrected artwork or a blank border.",
+                    "This file is the finished size only, with no bleed. "
+                    "Upload a PDF that includes the bleed, or accept a blank border. "
+                    "The artwork will not be stretched.",
                     actor,
                     original["id"],
                 )
@@ -574,12 +576,17 @@ async def readiness(job):
     settings = await db.settings.find_one({"kind": "settings"}, {"_id": 0})
     agent = await db.connector_state.find_one({"role": "agent"}, {"_id": 0})
     if not settings or not settings.get("printer"):
-        raise AppError("Configure a printer in Shop settings.")
+        raise AppError("No printer is selected. Verify a printer on the route step, then check again.")
     if not job.get("route") or job["route"]["settingsVersion"] != settings["version"]:
-        raise AppError("Production settings changed. Choose the route again.")
+        raise AppError("Shop settings changed after the route was chosen. Choose the production route again.")
     if not agent or not agent.get("writable"):
-        raise AppError("Shop disconnected. Start the connector with a writable staging folder.")
+        raise AppError(
+            "The shop computer is not connected. Start the connector with a writable folder, then check again. "
+            "This step does not print."
+        )
     heartbeat = datetime.fromisoformat(agent["lastSeen"])
     if datetime.now(timezone.utc) - heartbeat > timedelta(seconds=90):
-        raise AppError("Shop connector heartbeat is stale. Reconnect before authorization.")
+        raise AppError(
+            "The shop computer has not checked in for over a minute. Start the connector again, then check readiness."
+        )
     return agent

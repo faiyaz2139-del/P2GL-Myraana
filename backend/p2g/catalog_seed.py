@@ -89,17 +89,52 @@ def _trim(value):
     return text or "0"
 
 
+def _normalize_size_text(raw):
+    text = str(raw or "").strip()
+    text = text.replace("”", '"').replace("“", '"').replace("″", '"').replace("′", "'")
+    # Some pages encode an inch mark as two apostrophes: 24'' x 48''.
+    text = text.replace("''", '"')
+    return re.sub(r"(\d)\.(?=[x×])", r"\1", text)
+
+
+_UP_TO = re.compile(
+    rf"(?P<a>{_NUM})\s*(?P<ua>ft|feet|cm|mm|in(?:ch(?:es)?)?|[\"'])?\s+up to\s+"
+    rf"(?P<b>{_NUM})\s*(?P<ub>ft|feet|cm|mm|in(?:ch(?:es)?)?|[\"'])?",
+    re.IGNORECASE,
+)
+
+
+def parse_size_range(texts):
+    """Read a single '1 in up to 60 in' range when the page has no width × height."""
+    for raw in texts or []:
+        match = _UP_TO.search(_normalize_size_text(raw))
+        if not match:
+            continue
+        low, high = _number(match.group("a")), _number(match.group("b"))
+        if not low or not high or low <= 0 or high < low:
+            continue
+        unit = _unit(match.group("ub")) or _unit(match.group("ua")) or "in"
+        return {
+            "unit": unit,
+            "width_min": low,
+            "width_max": high,
+            "height_min": low,
+            "height_max": high,
+        }
+    return None
+
+
 def parse_sizes(texts, category=None):
     """Return parsed sizes and the strings that did not parse."""
     found, skipped = [], []
     for raw in texts or []:
-        text = str(raw or "").strip()
-        text = text.replace("”", '"').replace("“", '"').replace("″", '"').replace("′", "'")
-        text = re.sub(r"(\d)\.(?=[x×])", r"\1", text)
+        text = _normalize_size_text(raw)
         if not text or text.lower() == "unknown":
             continue
         pairs = list(_PAIR.finditer(text))
         if not pairs:
+            if parse_size_range([text]):
+                continue
             circle = _CIRCLE.search(text)
             if circle:
                 size = _number(circle.group("a"))
@@ -228,6 +263,15 @@ def build_presets(catalog):
         sizes, skipped = parse_sizes(size_text, item.get("category"))
         custom = _custom_range(item, calculators)
         notes = []
+        if custom is None:
+            ranged = parse_size_range(size_text)
+            if ranged:
+                custom = ranged
+                notes.append(
+                    "Custom size "
+                    f"{ranged['width_min']}–{ranged['width_max']} {ranged['unit']} "
+                    "was read from the product page."
+                )
         for key, value in specs.items():
             if value == "unknown":
                 notes.append(f"{key.replace('_', ' ')}: not shown on print2go.com")

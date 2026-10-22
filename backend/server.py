@@ -1063,8 +1063,14 @@ async def upload_artwork(
     original = await create_file(job, "ORIGINAL", content, None, "Original upload preserved.", file.filename)
     reset_from(job, 2, "New artwork version: downstream checks and approvals invalidated.")
     job.pop("inspection", None)
-    update_task(job, 1, "Completed", "Original PDF saved. Ready to check artwork.", user["name"], original["id"])
+    update_task(job, 1, "Completed", "Artwork saved. Checking it against this job.", user["name"], original["id"])
     await save_job(job)
+    try:
+        result = await process_with_lease(job["id"], job["generation"], user["name"])
+        job = result["job"]
+    except AppError:
+        job = await get_job(job["id"]) or job
+    job["statusLabel"] = status_label(job)
     return job
 
 
@@ -1123,6 +1129,7 @@ async def job_action(job_id: str, request: Request):
     if payload.get("generation") != job["generation"]:
         raise AppError("Job version changed. Refresh before continuing.")
     action = payload.get("action")
+    auto_process = False
     print_ready = latest(job, "PRINT_READY")
     if action == "bleed":
         require_completed(job, 3)
@@ -1136,7 +1143,14 @@ async def job_action(job_id: str, request: Request):
             "generation": job["generation"],
             "original_file_id": latest(job, "ORIGINAL")["id"],
         }
-        update_task(job, 3, "Completed", "Blank border outside trim accepted; content is not stretched.", user["name"])
+        update_task(
+            job,
+            3,
+            "Completed",
+            "Blank border accepted outside the trim. The artwork was not stretched. The print-ready file is next.",
+            user["name"],
+        )
+        auto_process = True
     elif action == "confirm-bleed":
         require_completed(job, 3)
         if job["tasks"][3]["status"] == "Completed":
@@ -1158,9 +1172,10 @@ async def job_action(job_id: str, request: Request):
             job,
             3,
             "Waiting for operator",
-            "Bleed handling confirmed. Continue to prepare the print-ready file.",
+            "Bleed confirmed. Building the print-ready file.",
             user["name"],
         )
+        auto_process = True
     elif action == "approve":
         require_completed(job, 7)
         if not print_ready or payload.get("sha") != print_ready["sha"] or not payload.get("acknowledged"):
@@ -1173,7 +1188,7 @@ async def job_action(job_id: str, request: Request):
             "generation": job["generation"],
         }
         update_task(job, 7, "Completed", "Proof approved for this exact PDF.", user["name"], print_ready["id"])
-        update_task(job, 8, "Waiting for operator", "Choose a compatible production route.", user["name"])
+        update_task(job, 8, "Waiting for operator", "Choose a press for this job, or keep it as a proof.", user["name"])
     elif action == "route":
         require_completed(job, 8)
         settings_data = await shop_settings()
@@ -1197,7 +1212,7 @@ async def job_action(job_id: str, request: Request):
                 job,
                 9,
                 "Waiting for operator",
-                "Proof-only jobs stop before the press. Choose a production route to continue.",
+                "Proof only: nothing is sent to a press. Switch to a production route here if this job should print.",
                 user["name"],
             )
         else:
@@ -1206,8 +1221,16 @@ async def job_action(job_id: str, request: Request):
             stock_ok = job["stock"] in (settings_data.get("stocks") or [])
             printer_ok = bool(printer) and (not verified or printer in verified)
             if not printer_ok or not stock_ok:
+                problems = []
+                if not printer:
+                    problems.append("No printer is selected.")
+                elif verified and printer not in verified:
+                    problems.append(f"{printer} is not a verified press.")
+                if not stock_ok:
+                    problems.append(f"Stock “{job['stock']}” is not on this shop's press list.")
                 raise AppError(
-                    "No verified production route for this stock. Verify a machine in Shop settings, or use a proof-only route.",
+                    " ".join(problems)
+                    + " Verify the printer on this step and add the stock, or choose Proof only. Nothing is sent to a press until you do.",
                     409,
                     code="machine-required",
                 )
@@ -1217,12 +1240,12 @@ async def job_action(job_id: str, request: Request):
                 "printer": printer,
             }
             update_task(job, 8, "Completed", f"Production route selected: {printer}.", user["name"])
-            update_task(job, 9, "Waiting for operator", "Stage in RIP without printing.", user["name"])
+            update_task(job, 9, "Waiting for operator", "Record the RIP job name. This does not print.", user["name"])
     elif action == "handoff":
         require_completed(job, 9)
         note = valid_text(payload.get("note"), "RIP handoff note", 1000, 5)
         update_task(job, 9, "Completed", f"RIP staging recorded: {note}. No print command sent.", user["name"])
-        update_task(job, 10, "Waiting for operator", "Verify shop connector readiness.", user["name"])
+        update_task(job, 10, "Waiting for operator", "Check that the shop computer is connected. This does not print.", user["name"])
     elif action == "readiness":
         require_completed(job, 10)
         agent = await readiness(job)
@@ -1300,6 +1323,12 @@ async def job_action(job_id: str, request: Request):
     else:
         raise AppError("This protected action is not available in the current workflow.")
     await save_job(job)
+    if auto_process:
+        try:
+            result = await process_with_lease(job["id"], job["generation"], user["name"])
+            job = result["job"]
+        except AppError:
+            job = await get_job(job_id) or job
     job["statusLabel"] = status_label(job)
     return job
 
