@@ -499,6 +499,9 @@ function JobView({ job, reload, back, settings, user, openSettings, onArchived }
       <button className="primary" onClick={() => act("route", { mode: "production" })} disabled={busy} data-testid="switch-production-route-button">Switch to production route</button>
     </div>;
     if (current === 9 && job.fieryHold?.status === "queued") return <p className="notice" data-testid="fiery-hold-pending">Sending the PRINT_READY file to the Fiery hold queue. It stays on HOLD and will not print.</p>;
+    if (current === 9 && job.route?.mode === "production" && job.fieryHold?.status !== "held" && (job.route.manual || oneFieryPress(settings?.discoveredPrinters) || isPrintOrder(job))) {
+      return <ManualPressCard job={job} settings={settings} proof={proof} act={act} busy={busy} openSettings={openSettings} />;
+    }
     if (current === 9 && job.productionChecklist) return <LondonChecklist job={job} action={act} busy={busy} />;
     if (current === 9) return <RIPAction action={act} busy={busy} />;
     if (current === 10) return <div>
@@ -507,7 +510,15 @@ function JobView({ job, reload, back, settings, user, openSettings, onArchived }
     </div>;
     if (current === 11) return <HumanAction label="I authorize staging this exact approved PDF. This does not print it." buttonLabel="Authorize production" ack={ack} setAck={setAck} busy={busy} testId="authorize-production" onAction={() => act("authorize", { sha: proof?.sha, acknowledged: ack })} />;
     if (current === 12) return <HumanAction label="The sheets have physically printed. A file copy does not count." buttonLabel="Confirm printed" ack={ack} setAck={setAck} busy={busy} testId="confirm-printed" onAction={() => act("printed", { acknowledged: ack })} />;
-    if (current === 13) return <div><p className="notice" data-testid="cutting-instructions">{job.recipe.cutInstructions}</p><HumanAction label="The pieces have been cut and finished as ordered." buttonLabel="Confirm cut" ack={ack} setAck={setAck} busy={busy} testId="confirm-cut" onAction={() => act("cut", { acknowledged: ack })} /></div>;
+    if (current === 13) {
+      const cutter = job.recipe?.production?.cutter;
+      const duplo = cutter
+        ? (cutter.model === "Duplo DC-618" && Number(cutter.jobNumber ?? 2) === 2
+          ? "Cut on Duplo DC-618, job 2"
+          : `Cut on ${cutter.model || "Duplo DC-618"}, job ${cutter.jobNumber || 2}`)
+        : job.recipe.cutInstructions;
+      return <div><p className="notice" data-testid="cutting-instructions">{duplo}</p><HumanAction label="The pieces have been cut and finished as ordered." buttonLabel="Confirm cut" ack={ack} setAck={setAck} busy={busy} testId="confirm-cut" onAction={() => act("cut", { acknowledged: ack })} /></div>;
+    }
     if (current === 14 && task.status === "Needs attention") return <button className="primary" onClick={() => act("rework")} disabled={busy} data-testid="start-rework-button">Start rework</button>;
     if (current === 14) return <QCAction action={act} busy={busy} />;
     if (current === 15) return <PackAction action={act} busy={busy} />;
@@ -562,6 +573,35 @@ function JobView({ job, reload, back, settings, user, openSettings, onArchived }
 
 function HumanAction({ label, buttonLabel, ack, setAck, busy, onAction, testId }) {
   return <div><label className="check-label"><input type="checkbox" checked={ack} onChange={(event) => setAck(event.target.checked)} data-testid={`${testId}-checkbox`} />{label}</label><button className="primary" disabled={busy || !ack} onClick={onAction} data-testid={`${testId}-button`}>{buttonLabel}</button></div>;
+}
+
+function isPrintOrder(job) {
+  const product = job?.spec?.product || job?.product || job?.recipe?.product || job?.recipe?.id || "";
+  return product === "business-card" || product === "flyer";
+}
+
+function oneFieryPress(printers) {
+  const fiery = (printers || []).filter((item) => item && item.isFiery && item.name);
+  const hosts = new Set(fiery.map((item) => String(item.address || "").trim() || item.name));
+  if (hosts.size !== 1) return "";
+  const server = fiery.find((item) => /fiery|command\s*workstation|\befi\b|ex-li|ex-i\b|ex-p\b|\bpx\d|server/i.test(`${item.name} ${item.model || ""} ${item.driver || ""}`));
+  return (server || fiery[0]).name;
+}
+
+function ManualPressCard({ job, settings, proof, act, busy, openSettings }) {
+  const fiery = oneFieryPress(settings?.discoveredPrinters || []);
+  const stock = job.stock || "the ordered stock";
+  const flyer = (job.spec?.product || job.product || job.recipe?.product || job.recipe?.id) === "flyer";
+  const impose = flyer ? "impose this flyer" : "impose with London BC";
+  return <div data-testid="manual-fiery-card">
+    {fiery && <button className="primary" disabled={busy} data-testid="send-fiery-hold-button" onClick={() => act("send-hold")}>Send to Fiery HOLD</button>}
+    <p data-testid="manual-fiery-instructions">Print it yourself: download the PRINT_READY PDF, import it to Fiery, hold it, {impose}, set {stock}</p>
+    <div className="action-row">
+      {proof && <a className="button" href={`${API}/files/${job.id}/${proof.id}?download`} data-testid="download-print-ready-button"><Download size={16} />Download PRINT_READY</a>}
+      <button className="primary" disabled={busy || !proof} data-testid="mark-sent-fiery-button" onClick={() => act("mark-sent")}>Mark sent to Fiery</button>
+    </div>
+    <button type="button" className="text-button" onClick={openSettings} data-testid="pair-connector-link">Pair the connector to send automatically</button>
+  </div>;
 }
 
 function connectorOnline(settings) {
@@ -642,9 +682,9 @@ function PrinterPicker({ settings, selected, onSelect, user, reload, testPrefix,
   }, [settings?.shopName]);
 
   useEffect(() => {
-    const fierys = printers.filter((item) => item.isFiery);
     const names = new Set(printers.map((item) => item.name));
-    if (fierys.length === 1 && (!selected || !names.has(selected))) onSelectRef.current(fierys[0].name);
+    const choice = oneFieryPress(printers);
+    if (choice && (!selected || !names.has(selected))) onSelectRef.current(choice);
   }, [printers, selected]);
 
   const load = async () => {
@@ -729,6 +769,7 @@ function RouteAction({ job, settings, user, act, busy, error, errorCode, openSet
   const savedPrinter = (settings?.printer || "").trim();
   const printerOk = Boolean(printer.trim()) && printer.trim() === savedPrinter && (verified.length === 0 || verified.includes(printer.trim()));
   const needsSetup = !stockListed || !printerOk;
+  const printOrder = isPrintOrder(job);
   const verifyAndRoute = async () => {
     const name = printer.trim();
     if (name.length < 2) {
@@ -767,18 +808,21 @@ function RouteAction({ job, settings, user, act, busy, error, errorCode, openSet
   };
   return <div data-testid="route-step">
     <p className="notice">
-      {needsSetup
+      {printOrder && needsSetup
+        ? `${job.stock} stays on the production route. Download the PRINT_READY file and send it to Fiery yourself, or pair the connector and it can be sent to HOLD.`
+        : needsSetup
         ? `${job.stock} ${stockListed ? "is on the press list" : "is not on the press list yet"}. ${printerOk ? `${printer} can run it.` : "Choose the press Myraana found and verify it here. You do not need to leave this job."}`
         : `${printer} can run ${job.stock}. Production stages the file. Proof only stops before the press.`}
     </p>
     <PrinterPicker settings={settings} selected={printer} onSelect={setPrinter} user={user} testPrefix="route" onOpenSettings={openSettings} />
     {working && <p className="route-spinner" data-testid="route-step-spinner"><i />Checking the printer. This stops after 10 seconds if the shop does not answer.</p>}
     <div className="action-row">
-      <button className="primary" onClick={() => choose("production")} disabled={busy || working || needsSetup} data-testid="select-route-button">Use production route</button>
+      <button className="primary" onClick={() => choose("production")} disabled={busy || working || (needsSetup && !printOrder)} data-testid="select-route-button">Use production route</button>
       {user?.role === "admin" && needsSetup && <button className="button" onClick={verifyAndRoute} disabled={busy || working || printer.trim().length < 2} data-testid="inline-verify-printer-button">{working ? "Checking…" : "Verify printer and add this stock"}</button>}
       <button className="button" onClick={() => choose("proof-only")} disabled={busy || working} data-testid="proof-only-route-button">Proof only</button>
     </div>
-    {user?.role !== "admin" && needsSetup && <p className="notice warning" data-testid="route-admin-needed">A shop admin needs to verify a printer for this stock. You can choose Proof only now.</p>}
+    {user?.role !== "admin" && needsSetup && !printOrder && <p className="notice warning" data-testid="route-admin-needed">A shop admin needs to verify a printer for this stock. You can choose Proof only now.</p>}
+    {user?.role !== "admin" && needsSetup && printOrder && <p className="notice" data-testid="route-stays-production">This job stays on the production route. Proof only is a separate choice.</p>}
     {(localError || errorCode === "machine-required" || errorCode === "conflict" || errorCode === "timeout" || errorCode === "network") && <p className="notice warning" data-testid="machine-required-notice">{localError || error || "Verify the printer above, or choose Proof only. Nothing is sent to a press until you do."}</p>}
   </div>;
 }

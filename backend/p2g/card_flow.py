@@ -228,10 +228,135 @@ def page_jobs(jobs, group, cursor="", limit=50):
 
 
 def fiery_target(settings):
-    for printer in (settings or {}).get("discoveredPrinters") or []:
-        if isinstance(printer, dict) and printer.get("isFiery") and printer.get("name"):
+    """The shop Fiery. One host wins even when its queue has a different name."""
+    from p2g.printer_discovery import preferred_printer
+
+    rows = [item for item in (settings or {}).get("discoveredPrinters") or [] if isinstance(item, dict)]
+    chosen = preferred_printer(rows)
+    if chosen:
+        for printer in rows:
+            if printer.get("name") == chosen:
+                return printer
+    for printer in rows:
+        if printer.get("isFiery") and printer.get("name"):
             return printer
     return None
+
+
+def print_order(job):
+    """A business card or flyer the customer ordered to be printed."""
+    spec = (job or {}).get("spec") or {}
+    recipe = (job or {}).get("recipe") or {}
+    product = str(
+        spec.get("product")
+        or (job or {}).get("product")
+        or recipe.get("product")
+        or recipe.get("id")
+        or ""
+    )
+    return product in {"business-card", "flyer"}
+
+
+def manual_press_message(job):
+    """Step-10 card when no press is paired. Proof-only is not this message."""
+    stock = str((job or {}).get("stock") or "").strip() or "the ordered stock"
+    recipe = (job or {}).get("recipe") or {}
+    preset = str((recipe.get("production") or {}).get("preset") or "")
+    spec = (job or {}).get("spec") or {}
+    product = str(spec.get("product") or (job or {}).get("product") or recipe.get("product") or recipe.get("id") or "")
+    if product == "business-card" or preset == "London BC" or is_london_card(recipe):
+        impose = "impose with London BC"
+    elif product == "flyer":
+        impose = "impose this flyer"
+    else:
+        impose = "impose the file"
+    return (
+        f"Print it yourself: download the PRINT_READY PDF, import it to Fiery, "
+        f"hold it, {impose}, set {stock}"
+    )
+
+
+def duplo_line(job):
+    """What the operator reads on the cutting step for a London card."""
+    recipe = (job or {}).get("recipe") or {}
+    cutter = (recipe.get("production") or {}).get("cutter") or {}
+    if not cutter and not is_london_card(recipe):
+        return ""
+    model = str(cutter.get("model") or "Duplo DC-618")
+    number = cutter.get("jobNumber") if cutter.get("jobNumber") not in (None, "") else 2
+    if model == "Duplo DC-618" and str(number) == "2":
+        return "Cut on Duplo DC-618, job 2"
+    return f"Cut on {model}, job {number}"
+
+
+def route_for_print_order(job, settings):
+    """Production route. A missing printer stays manual instead of proof-only."""
+    settings = settings or {}
+    fiery = fiery_target(settings)
+    saved = str(settings.get("printer") or "").strip()
+    verified = settings.get("verifiedPrinters") or []
+    printer = ""
+    if saved and (not verified or saved in verified):
+        printer = saved
+    elif fiery and fiery.get("name") and (not verified or fiery.get("name") in verified):
+        printer = str(fiery["name"])
+    return {
+        "mode": "production",
+        "settingsVersion": settings.get("version"),
+        "printer": printer or None,
+        "manual": not bool(printer),
+    }
+
+
+def keep_production_route(job, settings):
+    """Move a print order onto the production route without touching the proof.
+
+    Tasks before the route step, the approval, the generation, and the files
+    stay as they are. Proof-only is not chosen here.
+    """
+    approval = job.get("approval")
+    generation = job.get("generation")
+    files = job.get("files")
+    route = route_for_print_order(job, settings)
+    job["route"] = route
+    step = manual_press_message(job) if route.get("manual") else (
+        "Send the PRINT_READY file to the Fiery HOLD queue. It stays on HOLD and will not print."
+    )
+    tasks = job.get("tasks") or []
+    if len(tasks) > 8:
+        tasks[8]["status"] = "Completed"
+        tasks[8]["result"] = "Production route. The approved proof was kept."
+    if len(tasks) > 9:
+        tasks[9]["status"] = "Waiting for operator"
+        tasks[9]["result"] = step
+    if approval is not None:
+        job["approval"] = approval
+    if generation is not None:
+        job["generation"] = generation
+    if files is not None:
+        job["files"] = files
+    return job
+
+
+def mark_sent_to_fiery(job):
+    """The operator imported the file by hand. The next open step is printing."""
+    if (job.get("route") or {}).get("mode") != "production":
+        return ""
+    notes = (
+        (9, "Completed", "Operator placed the PRINT_READY file on the Fiery HOLD queue. Myraana did not print it."),
+        (10, "Completed", "Sent by hand. The shop connector was not required."),
+        (11, "Completed", "The approved PRINT_READY file was marked sent to Fiery."),
+        (12, "Waiting for operator", "Confirm only after the sheets physically print."),
+    )
+    tasks = job.get("tasks") or []
+    for index, status, result in notes:
+        if len(tasks) > index:
+            tasks[index]["status"] = status
+            tasks[index]["result"] = result
+    line = duplo_line(job)
+    if line and len(tasks) > 13:
+        tasks[13]["result"] = line
+    return line
 
 
 def auto_send_ready(job, settings):

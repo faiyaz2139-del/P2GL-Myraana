@@ -13,7 +13,7 @@ from p2g.connector_auth import (
 )
 from p2g.core import AppError, db, new_id, now
 from p2g.fiery_hold import interpret_hold_report
-from p2g.printer_discovery import normalise_reported, scan_is_due
+from p2g.printer_discovery import normalise_reported, preferred_printer, scan_is_due
 from p2g.printers import filter_printers
 from p2g.tenancy import PRINT2GO_SHOP_ID, bound_shop, current_shop_id, shop_scope, unscoped
 from p2g.workflow import file_bytes, get_job, latest, record_event, save_job, update_task
@@ -209,17 +209,24 @@ async def _record_holds(reports, settings):
 
 
 async def _pending_holds(settings, inventory):
-    if (settings or {}).get("fieryAutoSend") is not True:
-        return []
-    fiery = next((item for item in inventory.get("printers") or [] if item.get("isFiery") and item.get("name")), None)
+    printers = inventory.get("printers") or []
+    fiery_name = preferred_printer(printers)
+    fiery = next((item for item in printers if fiery_name and item.get("name") == fiery_name), None)
+    if fiery is None:
+        fiery = next((item for item in printers if item.get("isFiery") and item.get("name")), None)
     if not fiery:
         return []
+    # Shop-wide auto-send stays off unless the shop turned it on. An operator
+    # who clicks Send to Fiery HOLD still queues that one job.
+    query = {"state": "active", "fieryHold.status": "queued"}
+    if (settings or {}).get("fieryAutoSend") is not True:
+        query["fieryHold.explicit"] = True
     folders = inventory.get("hot_folders") or []
     hot = ""
     if folders and isinstance(folders[0], dict):
         hot = str(folders[0].get("path") or "")[:300]
     queued = await db.jobs.find(
-        exclude_archived({"state": "active", "fieryHold.status": "queued"}),
+        exclude_archived(query),
         {"_id": 0, "id": 1, "cardRoute": 1, "finish": 1, "stock": 1},
     ).to_list(5)
     outgoing = []
@@ -254,6 +261,10 @@ async def heartbeat(request, payload):
             fields = {"discoveredPrinters": inventory["printers"], "discoveredAt": now()}
             if scanned:
                 fields["scanFulfilledAt"] = now()
+            # One Fiery becomes the business-card press. A press the shop already chose stays.
+            chosen = preferred_printer(inventory["printers"])
+            if chosen and not str(settings.get("printer") or "").strip():
+                fields["printer"] = chosen
             await db.settings.update_one({"_id": settings["_id"]}, {"$set": fields})
             if fields.get("discoveredPrinters") is not None:
                 settings = {**settings, **fields}
