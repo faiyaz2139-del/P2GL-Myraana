@@ -79,8 +79,33 @@ function defaultGrommets(preset) {
   return 0;
 }
 
+function isCardstock(name) {
+  return /\b\d+(?:\.\d+)?\s*-?\s*pt\b|\bcard|\bcover\b/i.test(String(name || ""));
+}
+
+export function cardDefaults(preset, settings = {}, rules = {}) {
+  const base = defaultsFromPreset(preset, rules);
+  const sizes = preset?.sizes || [];
+  const standard = sizes.find((size) => Number(size.width) === 3.5 && Number(size.height) === 2 && (size.unit || "in") === "in") || sizes[0];
+  const saved = settings?.jobDefaults?.product === "business-card" ? settings.jobDefaults : null;
+  const card = (settings?.stocks || []).find((name) => isCardstock(name));
+  const savedFinish = /gloss/i.test(saved?.finish || "") ? "Glossy" : "Matte";
+  return {
+    ...base,
+    sizeId: standard?.id || "3.5x2-in",
+    width: standard?.width ?? 3.5,
+    height: standard?.height ?? 2,
+    unit: standard?.unit || "in",
+    quantity: saved?.quantity || base.quantity || 100,
+    stock: card || saved?.stock || base.stock || "14pt matte",
+    finish: saved ? savedFinish : "Matte",
+  };
+}
+
 export function defaultsFromPreset(preset, rules = {}) {
-  const size = preset?.sizes?.[0];
+  const size = preset?.id === "business-card"
+    ? (preset.sizes || []).find((item) => Number(item.width) === 3.5 && Number(item.height) === 2) || preset?.sizes?.[0]
+    : preset?.sizes?.[0];
   const custom = preset?.customSize;
   const width = size?.width ?? (custom?.width_min ?? "");
   const height = size?.height ?? (custom?.height_min ?? "");
@@ -94,7 +119,7 @@ export function defaultsFromPreset(preset, rules = {}) {
     quantity: firstQuantity(preset),
     sides,
     stock: preset?.stocks?.[0] || "Shop stock",
-    finish: preset?.finishes?.[0] || "Shop finish",
+    finish: preset?.id === "business-card" ? "Matte" : (preset?.finishes?.[0] || "Shop finish"),
     bleed: rules.bleedInches ?? 0.125,
     safe: rules.safeInches ?? 0.25,
     fold: preset?.folds?.length === 1 ? preset.folds[0] : "none",
@@ -139,7 +164,7 @@ export function JobModal({ catalog, settings, close, created }) {
   const saved = useMemo(() => ({ ...(readLocal() || {}), ...(settings?.jobDefaults || {}) }), [settings]);
   const rules = settings?.artworkRules || {};
   const starting = presets.find((item) => item.id === (saved.product || "business-card")) || presets[0];
-  const seeded = defaultsFromPreset(starting, rules);
+  const seeded = starting?.id === "business-card" ? cardDefaults(starting, settings, rules) : defaultsFromPreset(starting, rules);
   const repeat = saved.product && saved.product === starting?.id;
   const [productId, setProductId] = useState(starting?.id || "custom");
   const [sizeId, setSizeId] = useState(repeat ? (saved.sizeId || seeded.sizeId) : seeded.sizeId);
@@ -174,7 +199,7 @@ export function JobModal({ catalog, settings, close, created }) {
 
   const chooseProduct = (id) => {
     const next = presets.find((item) => item.id === id);
-    const defaults = defaultsFromPreset(next, rules);
+    const defaults = next?.id === "business-card" ? cardDefaults(next, settings, rules) : defaultsFromPreset(next, rules);
     setProductId(id);
     setSizeId(defaults.sizeId);
     setWidth(defaults.width);
@@ -321,10 +346,16 @@ export function JobModal({ catalog, settings, close, created }) {
             <input value={stock} onChange={(event) => setStock(event.target.value)} list="stock-options" required maxLength="120" data-testid="job-stock-select" />
             <datalist id="stock-options">{stockOptions.map((item) => <option key={item} value={item} />)}</datalist>
           </label>
-          <label>Finish
+          {productId === "business-card" ? <div data-testid="job-finish-choice">
+            <span>Finish</span>
+            <div className="finish-choice">
+              <button type="button" className={finish === "Matte" ? "primary" : "button"} data-testid="job-finish-matte" onClick={() => setFinish("Matte")}>Matte</button>
+              <button type="button" className={finish === "Glossy" ? "primary" : "button"} data-testid="job-finish-glossy" onClick={() => setFinish("Glossy")}>Glossy</button>
+            </div>
+          </div> : <label>Finish
             <input value={finish} onChange={(event) => setFinish(event.target.value)} list="finish-options" required maxLength="120" data-testid="job-finish-select" />
             <datalist id="finish-options">{finishOptions.map((item) => <option key={item} value={item} />)}</datalist>
-          </label>
+          </label>}
           <label>Fold
             <select value={fold} onChange={(event) => setFold(event.target.value)} data-testid="job-fold-select">
               {FOLDS.map(([id, label]) => <option key={id} value={id}>{label}</option>)}

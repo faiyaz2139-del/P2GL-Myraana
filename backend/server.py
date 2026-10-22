@@ -18,12 +18,26 @@ from p2g.ai import configured as ai_configured, conversation_events
 from p2g.agent_bridge import evaluate_agents
 from p2g.billing import billing_status, checkout_available
 from p2g.build_metadata import read_build_metadata
+from p2g.card_flow import (
+    AUTO_ACTOR,
+    apply_card_defaults,
+    apply_known_stock,
+    auto_send_ready,
+    clamp_limit,
+    encode_cursor,
+    fiery_target,
+    known_finish,
+    queue_bucket,
+    queue_page_query,
+    QUEUE_IDS,
+)
 from p2g.connector_pairing import (
     approve_pairing,
     claim_pairing,
     create_pairing,
     heartbeat as paired_heartbeat,
     devices as paired_devices,
+    hold_pdf,
     pairings,
     pairing_status,
 )
@@ -694,6 +708,17 @@ async def paired_connector_heartbeat(request: Request):
     return await paired_heartbeat(request, await request.json())
 
 
+@api.get("/connector-devices/holds/{job_id}")
+async def connector_hold_file(job_id: str, request: Request):
+    content, name = await hold_pdf(request, job_id)
+    safe = name.replace("\r", "").replace("\n", "")[:180]
+    return Response(
+        content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{safe}"'},
+    )
+
+
 @api.post("/settings")
 async def update_settings(request: Request):
     assert_origin(request)
@@ -717,6 +742,7 @@ async def update_settings(request: Request):
         "verifiedPrinters": current.get("verifiedPrinters") or [],
         "jobDefaults": current.get("jobDefaults"),
         "artworkRules": current.get("artworkRules"),
+        "fieryAutoSend": payload.get("fieryAutoSend") is True if "fieryAutoSend" in payload else current.get("fieryAutoSend") is True,
     }
     for key in ("discoveredPrinters", "discoveredAt", "scanRequestedAt", "scanFulfilledAt"):
         if key in current:
@@ -1041,15 +1067,50 @@ async def accept_operator_invite(request: Request):
     return response
 
 
+async def _backfill_queues():
+    """Stamp a queue on older jobs so the list can use the shop_queue_updated index."""
+    for _ in range(6):
+        missing = await db.jobs.find(
+            {"queue": {"$exists": False}},
+            {"messages": 0, "events": 0, "files": 0},
+        ).to_list(400)
+        if not missing:
+            return
+        for job in missing:
+            ident = job.get("_id") or job.get("id")
+            await db.jobs.update_one({"_id": ident}, {"$set": {"queue": queue_bucket(job)}})
+
+
 @api.get("/jobs")
 async def jobs(request: Request):
     require_user(await current_user(request))
-    found = await db.jobs.find(exclude_archived(), {"_id": 0}).sort("created", -1).to_list(500)
+    params = request.query_params
+    group = params.get("group") or "needs-you"
+    if group not in QUEUE_IDS:
+        group = "needs-you"
+    limit = clamp_limit(params.get("limit") or 50)
+    await _backfill_queues()
+    query, ordering = queue_page_query(group, params.get("cursor") or "")
+    found = await db.jobs.find(
+        query,
+        {"messages": 0, "events": 0, "files": 0, "inspection": 0, "verification": 0, "productionChecklist": 0},
+    ).sort(ordering).to_list(limit + 1)
+    next_cursor = None
+    if len(found) > limit:
+        found = found[:limit]
+        last = found[-1]
+        next_cursor = encode_cursor(last.get("updated"), last.get("_id") or last.get("id"))
+    slim = []
     for item in found:
+        item.pop("_id", None)
         item["messages"] = []
         item["events"] = []
         item["statusLabel"] = status_label(item)
-    return found
+        slim.append(item)
+    counts = {}
+    for name in QUEUE_IDS:
+        counts[name] = await db.jobs.count_documents(exclude_archived({"queue": name}))
+    return {"group": group, "counts": counts, "jobs": slim, "nextCursor": next_cursor}
 
 
 @api.post("/jobs")
@@ -1059,6 +1120,11 @@ async def create_job(request: Request):
     payload = await request.json()
     if payload.get("confirmed") is not True:
         raise AppError("Confirm the order details before creating the job.", 400)
+    settings_data = await shop_settings()
+    preset_id = str(payload.get("product") or payload.get("presetId") or "business-card")
+    recipe_doc = await db.recipes.find_one({"id": preset_id}, {"_id": 0}, sort=[("version", -1)])
+    if preset_id == "business-card":
+        payload = apply_card_defaults(payload, settings_data, recipe_doc)
     try:
         quantity = int(payload.get("quantity"))
     except (TypeError, ValueError) as error:
@@ -1066,9 +1132,7 @@ async def create_job(request: Request):
     if not 1 <= quantity <= 1_000_000:
         raise AppError("Quantity is outside the supported range.", 400)
     due = valid_due(payload.get("due"))
-    rules = artwork_rules_from_settings(await shop_settings())
-    preset_id = str(payload.get("product") or payload.get("presetId") or "business-card")
-    recipe_doc = await db.recipes.find_one({"id": preset_id}, {"_id": 0}, sort=[("version", -1)])
+    rules = artwork_rules_from_settings(settings_data)
     try:
         spec, recipe = resolve_spec({**payload, "product": preset_id}, rules, recipe_doc)
     except SpecError as error:
@@ -1101,6 +1165,7 @@ async def create_job(request: Request):
     }
     update_task(job, 0, "Completed", f"Order details confirmed by {user['name']}.", user["name"])
     record_event(job, "Order created.", user["name"])
+    job["queue"] = queue_bucket(job)
     await db.jobs.insert_one({"_id": job["id"], **job})
     await db.settings.update_one(
         {"kind": "settings"},
@@ -1167,7 +1232,7 @@ async def upload_artwork(
     update_task(job, 1, "Completed", "Artwork saved. Checking it against this job.", user["name"], original["id"])
     await save_job(job)
     try:
-        result = await process_with_lease(job["id"], job["generation"], user["name"])
+        result = await process_with_lease(job["id"], job["generation"], AUTO_ACTOR)
         job = result["job"]
     except AppError:
         job = await get_job(job["id"]) or job
@@ -1180,7 +1245,7 @@ async def process_job(job_id: str, request: Request):
     assert_origin(request)
     user = require_user(await current_user(request))
     payload = await request.json()
-    result = await process_with_lease(job_id, payload.get("generation"), user["name"])
+    result = await process_with_lease(job_id, payload.get("generation"), AUTO_ACTOR)
     return {"queued": result["queued"], "execution": result["execution"], "job": result["job"]}
 
 
@@ -1319,6 +1384,54 @@ async def job_action(job_id: str, request: Request):
             job["productionChecklist"] = checklist
             job.pop("productionStop", None)
             job["connectorHook"] = connector_production_hook(job)
+        settings_data = await shop_settings()
+        chosen = known_finish(payload.get("finish")) or known_finish(job.get("finish"))
+        if chosen:
+            job["finish"] = chosen
+            if isinstance(job.get("spec"), dict):
+                job["spec"]["finish"] = chosen
+        matched = auto_send_ready(job, settings_data)
+        london = is_london_card(job.get("recipe") or {})
+        if settings_data.get("fieryAutoSend") is True and london and fiery_target(settings_data) and not matched:
+            job["productionStop"] = (
+                "Fiery hold was not sent: the finish is not a cardstock on this shop's list. "
+                "Use the checklist. Nothing was printed."
+            )
+            update_task(job, 8, "Needs attention", job["productionStop"], AUTO_ACTOR)
+        elif matched:
+            printer = fiery_target(settings_data)
+            job["route"] = {
+                "mode": "production",
+                "settingsVersion": settings_data.get("version"),
+                "printer": printer["name"],
+                "auto": True,
+            }
+            update_task(
+                job,
+                8,
+                "Completed",
+                f"Production route selected: {printer['name']}. The file stays on HOLD.",
+                AUTO_ACTOR,
+            )
+            update_task(
+                job,
+                9,
+                "Running",
+                "Sending the PRINT_READY file to the Fiery hold queue. It will not print.",
+                AUTO_ACTOR,
+            )
+            job["fieryHold"] = {
+                "status": "queued",
+                "preset": "London BC",
+                "stock": matched,
+                "finish": job.get("finish"),
+                "printer": printer["name"],
+                "address": printer.get("address") or "",
+                "at": now(),
+                "held": False,
+                "printed": False,
+            }
+            job.pop("productionStop", None)
     elif action == "route":
         require_completed(job, 8)
         settings_data = await shop_settings()
@@ -1401,6 +1514,16 @@ async def job_action(job_id: str, request: Request):
             job["recipe"],
             settings_data.get("stocks") or [],
         )
+        if not outcome["stop"]:
+            stock_outcome = apply_known_stock(job, settings_data.get("stocks") or [])
+            if stock_outcome:
+                outcome = stock_outcome
+                if not stock_outcome["stop"]:
+                    record_event(
+                        job,
+                        f"Finish {job.get('finish')} was already known, so the Fiery stock step was answered.",
+                        AUTO_ACTOR,
+                    )
         if outcome["stop"]:
             job["productionStop"] = outcome["stop"]
             update_task(job, 9, "Needs attention", outcome["stop"], user["name"])
@@ -1502,7 +1625,7 @@ async def job_action(job_id: str, request: Request):
     await save_job(job)
     if auto_process:
         try:
-            result = await process_with_lease(job["id"], job["generation"], user["name"])
+            result = await process_with_lease(job["id"], job["generation"], AUTO_ACTOR)
             job = result["job"]
         except AppError:
             job = await get_job(job_id) or job
