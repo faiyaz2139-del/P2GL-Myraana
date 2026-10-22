@@ -1,100 +1,484 @@
-"""Submit a PRINT_READY PDF to a Fiery hold queue. This never prints or releases."""
+"""Submit a PRINT_READY PDF to a Fiery Hold queue. This never prints or releases.
+
+The file goes to the published Hold queue: LPR queue "hold" (RFC 1179), then IPP
+/ipp/hold or /hold, then the Windows share \\\\address\\hold. The Fiery API is used
+only when the connector has an API key, user, and password. print and direct
+are refused.
+"""
 import json
+import os
+import socket
+import ssl
+import time
+import http.client
 from pathlib import Path
+from urllib.parse import urlparse
 
 
+HOLD_QUEUE = "hold"
 HOLD_STATUSES = {200, 201, 202, 204}
+CONFIRMED_METHODS = {"lpr", "ipp", "smb", "api", "hot-folder"}
+IPP_HOLD_PATHS = ("/ipp/hold", "/hold")
+API_PATHS = {"/live/api/v5/login", "/live/api/v5/jobs"}
 
 
-def hold_payload(filename, preset, stock):
+def hold_queue_name(queue):
+    """The only queue this program may name. print and direct are refused."""
+    name = str("hold" if queue is None or str(queue).strip() == "" else queue).strip().lower()
+    if name != HOLD_QUEUE:
+        raise RuntimeError("Refusing to print. Only the hold queue is allowed.")
+    return HOLD_QUEUE
+
+
+def hold_ipp_paths(queue="hold"):
+    hold_queue_name(queue)
+    paths = []
+    for path in IPP_HOLD_PATHS:
+        if path != "/hold" and not path.endswith("/hold"):
+            raise RuntimeError("Refusing to print. Only the hold queue is allowed.")
+        if "print" in path or "direct" in path:
+            raise RuntimeError("Refusing to print. Only the hold queue is allowed.")
+        paths.append(path)
+    return tuple(paths)
+
+
+def host_only(address):
+    text = str(address or "").strip()
+    if "://" in text:
+        text = urlparse(text).hostname or ""
+    if text.startswith("[") and "]" in text:
+        text = text[1:text.index("]")]
+    elif text.count(":") == 1:
+        text = text.split(":", 1)[0]
+    return text.strip()
+
+
+def pdf_filename(filename):
+    name = Path(str(filename or "")).name
+    if not name or name in {".", ".."} or any(char in name for char in "\\/\x00\r\n"):
+        name = "artwork_PRINT_READY.pdf"
+    if not name.lower().endswith(".pdf"):
+        name = "artwork_PRINT_READY.pdf"
+    return name[:180]
+
+
+def job_label(job_name="", job_id="", filename=""):
+    """The name Command WorkStation shows for this held job."""
+    parts = []
+    for value in (job_name, job_id):
+        text = "".join(char if ord(char) >= 32 else " " for char in str(value or ""))
+        text = " ".join(text.split())
+        if text and text not in parts:
+            parts.append(text)
+    label = " ".join(parts).strip()
+    if not label:
+        label = pdf_filename(filename)[:-4]
+    return label[:120] or "Myraana"
+
+
+def hold_payload(filename, preset, stock, job_name=""):
     """Attributes for a hold submission. print and release stay false."""
     payload = {
-        "filename": Path(str(filename or "artwork_PRINT_READY.pdf")).name[:180] or "artwork_PRINT_READY.pdf",
-        "queue": "hold",
+        "filename": pdf_filename(filename),
+        "queue": HOLD_QUEUE,
         "preset": str(preset or "London BC")[:80],
         "stock": str(stock or "")[:120],
+        "jobName": job_label(job_name, "", filename),
         "print": False,
         "release": False,
     }
-    if payload["print"] or payload["release"] or payload["queue"] != "hold":
+    if payload["print"] or payload["release"] or payload["queue"] != HOLD_QUEUE:
         raise RuntimeError("Refusing to print.")
     return payload
 
 
-def submit_hold(address, filename, preset, stock, pdf, opener=None, hot_folder=None, timeout=8.0):
-    """Put the file on HOLD via the Fiery API, or a Hold hot folder if the API fails.
+def fiery_credentials(value):
+    """API login is used only when the key, user, and password are all set."""
+    if not isinstance(value, dict):
+        return None
+    api_key = str(value.get("apiKey") or value.get("api_key") or value.get("apikey") or "").strip()
+    username = str(value.get("username") or value.get("user") or "").strip()
+    password = str(value.get("password") or "")
+    if not api_key or not username or not password.strip():
+        return None
+    return {"apiKey": api_key, "username": username, "password": password}
 
-    opener(url, payload, pdf_bytes, timeout) returns an HTTP status. It must not be asked to print.
+
+def assert_pinned_peer(expected, actual):
+    """A self-signed Fiery certificate is accepted only for this one address."""
+    if not expected or str(actual) != str(expected):
+        raise RuntimeError("Refusing a certificate that is not pinned to the Fiery address.")
+
+
+def hold_method_label(method):
+    return {
+        "lpr": "LPR",
+        "ipp": "IPP",
+        "smb": "SMB",
+        "api": "the Fiery API",
+        "hot-folder": "the Hold folder",
+    }.get(method, "the Hold queue")
+
+
+def _failed(method, detail):
+    text = " ".join(str(detail or "Fiery did not accept the hold.").split())
+    if "Nothing was printed" not in text and "stays on HOLD" not in text:
+        text = text.rstrip(".") + ". Nothing was printed."
+    return {
+        "ok": False,
+        "held": False,
+        "printed": False,
+        "method": method if method in CONFIRMED_METHODS else "",
+        "error": text[:500],
+    }
+
+
+def _confirmed(method):
+    if method not in CONFIRMED_METHODS:
+        raise RuntimeError("Refusing to print. Only the hold queue is allowed.")
+    return {"ok": True, "held": True, "printed": False, "method": method, "error": ""}
+
+
+def submit_hold(
+    address,
+    filename,
+    preset,
+    stock,
+    pdf,
+    opener=None,
+    hot_folder=None,
+    timeout=8.0,
+    job_name="",
+    job_id="",
+    credentials=None,
+    queue="hold",
+    lpr=None,
+    ipp=None,
+    smb=None,
+    api=None,
+):
+    """Put the PDF on the Fiery Hold queue. A transport must confirm before this returns held.
+
+    opener is ignored. The API is used only when credentials contains an API key,
+    user, and password, and only after the Hold queue transports fail.
     """
-    payload = hold_payload(filename, preset, stock)
-    api_error = "No Fiery address."
-    if address and opener is not None:
-        url = f"https://{address}:443/live/api/v5/jobs"
+    del opener
+    try:
+        queue = hold_queue_name(queue)
+        payload = hold_payload(filename, preset, stock, job_label(job_name, job_id, filename))
+    except RuntimeError as error:
+        return _failed("", str(error))
+    pdf = pdf or b""
+    label = payload["jobName"]
+    errors = []
+
+    def attempt(method, func):
         try:
-            status = int(opener(url, payload, pdf or b"", timeout))
-        except Exception:
-            status = 0
-            api_error = "Fiery did not answer."
-        else:
-            api_error = f"Fiery answered {status}."
-        if status in HOLD_STATUSES:
-            return {"ok": True, "held": True, "printed": False, "method": "api", "error": ""}
+            outcome = func()
+        except Exception as error:
+            errors.append(f"{method}: {error}")
+            return None
+        if (
+            isinstance(outcome, dict)
+            and outcome.get("ok") is True
+            and outcome.get("held") is True
+            and outcome.get("printed") is not True
+            and outcome.get("release") is not True
+            and outcome.get("released") is not True
+        ):
+            return _confirmed(method)
+        errors.append(f"{method}: the transport did not confirm the hold.")
+        return None
+
+    lpr_fn = lpr or send_lpr
+    held = attempt("lpr", lambda: lpr_fn(address, pdf, label, payload["filename"], timeout, queue))
+    if held:
+        return held
+    ipp_fn = ipp or send_ipp
+    held = attempt("ipp", lambda: ipp_fn(address, pdf, label, payload["filename"], timeout, queue))
+    if held:
+        return held
+    smb_fn = smb or send_smb
+    held = attempt("smb", lambda: smb_fn(address, pdf, payload["filename"], timeout, queue))
+    if held:
+        return held
     if hot_folder:
+        held = attempt("hot-folder", lambda: _commit_hot_folder(hot_folder, payload["filename"], pdf))
+        if held:
+            return held
+    creds = fiery_credentials(credentials)
+    if creds:
+        api_fn = api or fiery_api_submit
+        held = attempt("api", lambda: api_fn(address, pdf, payload, creds, timeout))
+        if held:
+            return held
+    detail = "The Fiery Hold queue did not confirm the file."
+    if errors:
+        detail = detail + " " + " ".join(errors)
+    return _failed("", detail)
+
+
+def send_lpr(address, pdf, job_name, filename, timeout, queue="hold", port=515):
+    """RFC 1179 receive-job for the hold queue. Every acknowledgement must be zero."""
+    queue = hold_queue_name(queue)
+    host = host_only(address)
+    if not host:
+        raise RuntimeError("No Fiery address.")
+    title = job_label(job_name, "", filename)
+    visible = title if title.lower().endswith(".pdf") else f"{title}.pdf"
+    number = f"{(time.monotonic_ns() // 1_000_000) % 1000:03d}"
+    control_host = "myraana"
+    data_name = f"dfA{number}{control_host}"
+    control_name = f"cfA{number}{control_host}"
+    control = (
+        f"H{control_host}\n"
+        f"Pmyraana\n"
+        f"J{title}\n"
+        f"C{control_host}\n"
+        f"N{visible[:120]}\n"
+        f"l{data_name}\n"
+        f"U{data_name}\n"
+    ).encode("utf-8")
+    pdf = pdf or b""
+    with socket.create_connection((host, int(port)), timeout=timeout) as sock:
+        sock.settimeout(timeout)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        _lpr_command(sock, b"\x02" + queue.encode("ascii") + b"\n")
+        _lpr_command(sock, f"\x02{len(control)} {control_name}\n".encode("ascii"))
+        sock.sendall(control + b"\x00")
+        _lpr_ack(sock)
+        _lpr_command(sock, f"\x03{len(pdf)} {data_name}\n".encode("ascii"))
+        sock.sendall(pdf + b"\x00")
+        _lpr_ack(sock)
+    return _confirmed("lpr")
+
+
+def _lpr_command(sock, packet):
+    sock.sendall(packet)
+    _lpr_ack(sock)
+
+
+def _lpr_ack(sock):
+    data = b""
+    while len(data) < 1:
+        chunk = sock.recv(1)
+        if not chunk:
+            raise RuntimeError("Fiery closed the LPR connection before confirming the hold.")
+        data += chunk
+    if data != b"\x00":
+        raise RuntimeError(f"Fiery LPR refused the hold (code {data[0]}).")
+
+
+def build_ipp_print_job(printer_uri, document_name, pdf):
+    """Print-Job aimed at a Hold queue, with job-hold-until indefinite. It does not release."""
+    if "/hold" not in str(printer_uri) or "print" in urlparse(printer_uri).path or "direct" in urlparse(printer_uri).path:
+        raise RuntimeError("Refusing to print. Only the hold queue is allowed.")
+
+    def attr(tag, name, value):
+        name_b = name.encode("utf-8")
+        value_b = value.encode("utf-8") if isinstance(value, str) else value
+        return bytes([tag]) + len(name_b).to_bytes(2, "big") + name_b + len(value_b).to_bytes(2, "big") + value_b
+
+    message = bytearray()
+    message += bytes([0x01, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01])
+    message += bytes([0x01])
+    message += attr(0x47, "attributes-charset", "utf-8")
+    message += attr(0x48, "attributes-natural-language", "en")
+    message += attr(0x45, "printer-uri", printer_uri)
+    message += attr(0x42, "requesting-user-name", "myraana")
+    message += attr(0x42, "document-name", document_name)
+    message += attr(0x49, "document-format", "application/pdf")
+    message += bytes([0x02])
+    message += attr(0x44, "job-hold-until", "indefinite")
+    message += bytes([0x03])
+    message += pdf or b""
+    return bytes(message)
+
+
+def ipp_confirmed(http_status, payload):
+    """True only when IPP reports a successful-ok class status for the Hold job."""
+    if int(http_status) != 200 or not payload or len(payload) < 8:
+        return False
+    status = int.from_bytes(payload[2:4], "big")
+    return status <= 0x00FF
+
+
+def send_ipp(address, pdf, job_name, filename, timeout, queue="hold", port=631, post=None):
+    queue = hold_queue_name(queue)
+    host = host_only(address)
+    if not host:
+        raise RuntimeError("No Fiery address.")
+    title = job_label(job_name, "", filename)
+    errors = []
+    for path in hold_ipp_paths(queue):
+        printer_uri = f"ipp://{host}{path}"
+        body = build_ipp_print_job(printer_uri, title, pdf or b"")
         try:
-            _write_hold_folder(hot_folder, payload["filename"], pdf or b"")
-        except Exception:
-            return {
-                "ok": False,
-                "held": False,
-                "printed": False,
-                "method": "hot-folder",
-                "error": "The hot folder could not be written. Nothing was printed.",
-            }
-        return {"ok": True, "held": True, "printed": False, "method": "hot-folder", "error": ""}
-    return {"ok": False, "held": False, "printed": False, "method": "api", "error": api_error}
+            if post is not None:
+                status, payload = post(host, path, body, timeout)
+            else:
+                status, payload = _ipp_post(host, int(port), path, body, timeout)
+        except Exception as error:
+            errors.append(f"{path}: {error}")
+            continue
+        if ipp_confirmed(status, payload):
+            return _confirmed("ipp")
+        errors.append(f"{path}: IPP did not confirm the hold.")
+    raise RuntimeError("IPP did not confirm the hold. " + " ".join(errors))
 
 
-def interpret_hold_report(report):
-    """A connector report may confirm a hold. A print or release is refused."""
-    if not isinstance(report, dict):
-        return {"ok": False, "held": False, "printed": False, "method": "", "error": "The connector report was empty."}
-    if report.get("printed") is True or report.get("released") is True or report.get("release") is True:
-        return {
-            "ok": False,
-            "held": False,
-            "printed": False,
-            "method": "",
-            "error": "Refused a print or release. The job stays on HOLD.",
-        }
-    if report.get("ok") is True and report.get("held") is True:
-        method = report.get("method") if report.get("method") in {"api", "hot-folder"} else "api"
-        return {"ok": True, "held": True, "printed": False, "method": method, "error": ""}
-    error = str(report.get("error") or "Fiery did not accept the hold.")[:300]
-    return {"ok": False, "held": False, "printed": False, "method": str(report.get("method") or "api")[:40], "error": error}
+def _ipp_post(host, port, path, body, timeout):
+    if path not in hold_ipp_paths():
+        raise RuntimeError("Refusing to print. Only the hold queue is allowed.")
+    connection = http.client.HTTPConnection(host, port, timeout=timeout)
+    try:
+        connection.request(
+            "POST",
+            path,
+            body=body,
+            headers={"Content-Type": "application/ipp"},
+        )
+        response = connection.getresponse()
+        return response.status, response.read()
+    finally:
+        connection.close()
 
 
-def _write_hold_folder(folder, filename, pdf):
-    root = Path(folder).resolve()
-    hold = root / "Hold"
-    hold.mkdir(parents=True, exist_ok=True)
-    safe = Path(str(filename or "")).name
-    if not safe or safe in {".", ".."} or not safe.lower().endswith(".pdf"):
-        raise ValueError("filename")
-    target = (hold / safe).resolve()
-    if hold.resolve() not in target.parents:
-        raise ValueError("path")
+def smb_hold_unc(address, filename, queue="hold"):
+    hold_queue_name(queue)
+    host = host_only(address)
+    if not host or any(char in host for char in "\\/"):
+        raise RuntimeError("Fiery address is invalid.")
+    path = f"\\\\{host}\\hold\\{pdf_filename(filename)}"
+    lowered = path.lower()
+    if "\\hold\\" not in lowered or "\\print\\" in lowered or "\\direct\\" in lowered:
+        raise RuntimeError("Refusing to print. Only the hold queue is allowed.")
+    return path
+
+
+def send_smb(address, pdf, filename, timeout, queue="hold", copy=None):
+    """Copy onto \\\\address\\hold. Used on the shop Windows computer."""
+    del timeout
+    path = smb_hold_unc(address, filename, queue)
+    writer = copy or _copy_unc
+    if copy is None and os.name != "nt":
+        raise RuntimeError("SMB Hold copy is only used on the shop Windows computer.")
+    writer(path, pdf or b"")
+    return _confirmed("smb")
+
+
+def _copy_unc(path, pdf):
+    if "\\hold\\" not in path.lower():
+        raise RuntimeError("Refusing to print. Only the hold queue is allowed.")
+    target = Path(path)
     target.write_bytes(pdf)
+    if target.stat().st_size != len(pdf) or target.read_bytes() != pdf:
+        raise RuntimeError("The Hold share did not confirm the file.")
 
 
-def fiery_opener(url, payload, pdf, timeout):
-    """POST the hold attributes and the PDF. There is no print or release call."""
-    import urllib.error
-    import urllib.request
+def _commit_hot_folder(folder, filename, pdf):
+    _write_hold_folder(folder, filename, pdf)
+    return _confirmed("hot-folder")
 
-    if payload.get("print") or payload.get("release") or payload.get("queue") != "hold":
+
+def _pinned_ipv4(address):
+    host = host_only(address)
+    parts = host.split(".")
+    if len(parts) != 4:
+        raise RuntimeError("Fiery API login is pinned to one IP address.")
+    try:
+        if any(not part.isdigit() or int(part) > 255 for part in parts):
+            raise RuntimeError("Fiery API login is pinned to one IP address.")
+    except RuntimeError:
+        raise
+    socket.inet_aton(host)
+    return host
+
+
+def fiery_api_submit(address, pdf, payload, credentials, timeout):
+    """Login, then submit the hold. The self-signed certificate is pinned to this IP."""
+    if payload.get("print") or payload.get("release") or payload.get("queue") != HOLD_QUEUE:
+        raise RuntimeError("Refusing to print.")
+    creds = fiery_credentials(credentials)
+    if not creds:
+        raise RuntimeError("Fiery API login needs an API key, user, and password.")
+    host = _pinned_ipv4(address)
+    token = _fiery_login(host, creds, timeout)
+    status = _fiery_post_job(host, token, payload, pdf or b"", timeout)
+    if int(status) not in HOLD_STATUSES:
+        raise RuntimeError(f"Fiery answered {status}.")
+    return _confirmed("api")
+
+
+def _fiery_login(host, credentials, timeout):
+    body = json.dumps(
+        {
+            "username": credentials["username"],
+            "password": credentials["password"],
+            "apikey": credentials["apiKey"],
+            "apiKey": credentials["apiKey"],
+        }
+    ).encode("utf-8")
+    status, payload = _pinned_request(
+        host,
+        "POST",
+        "/live/api/v5/login",
+        body,
+        {"Content-Type": "application/json"},
+        timeout,
+    )
+    if status not in HOLD_STATUSES:
+        raise RuntimeError(f"Fiery login was refused ({status}).")
+    try:
+        data = json.loads(payload.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    for key in ("token", "session", "sessionId", "access_token", "accessToken"):
+        if data.get(key):
+            return str(data[key])
+    raise RuntimeError("Fiery login did not return a session.")
+
+
+def _fiery_post_job(host, token, payload, pdf, timeout):
+    content_type, body = _job_body(payload, pdf)
+    status, _payload = _pinned_request(
+        host,
+        "POST",
+        "/live/api/v5/jobs",
+        body,
+        {"Content-Type": content_type, "Authorization": f"Bearer {token}"},
+        timeout,
+    )
+    return status
+
+
+def _pinned_request(host, method, path, body, headers, timeout):
+    host = _pinned_ipv4(host)
+    if path not in API_PATHS:
+        raise RuntimeError("Refusing a Fiery call that is not login or a hold submission.")
+    # The Fiery certificate is self-signed. Verification is the peer IP, not a public CA.
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    connection = http.client.HTTPSConnection(host, 443, timeout=timeout, context=context)
+    try:
+        connection.connect()
+        peer = connection.sock.getpeername()[0]
+        assert_pinned_peer(host, peer)
+        connection.request(method, path, body=body, headers=headers)
+        response = connection.getresponse()
+        return response.status, response.read()
+    finally:
+        connection.close()
+
+
+def _job_body(payload, pdf):
+    if payload.get("print") or payload.get("release") or payload.get("queue") != HOLD_QUEUE:
         raise RuntimeError("Refusing to print.")
     boundary = "----myraana-hold"
-    meta = json.dumps(payload).encode("utf-8")
+    meta = json.dumps({key: value for key, value in payload.items() if key != "jobName"}).encode("utf-8")
     filename = payload["filename"]
     body = b"".join(
         [
@@ -107,14 +491,51 @@ def fiery_opener(url, payload, pdf, timeout):
             f"--{boundary}--\r\n".encode(),
         ]
     )
-    call = urllib.request.Request(
-        url,
-        data=body,
-        method="POST",
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-    )
-    try:
-        with urllib.request.urlopen(call, timeout=timeout) as response:
-            return response.status
-    except urllib.error.HTTPError as error:
-        return error.code
+    return f"multipart/form-data; boundary={boundary}", body
+
+
+def fiery_opener(url, payload, pdf, timeout, headers=None, pinned_ip=None):
+    """POST a hold to one pinned Fiery IP. There is no print or release call."""
+    if payload.get("print") or payload.get("release") or payload.get("queue") != HOLD_QUEUE:
+        raise RuntimeError("Refusing to print.")
+    host = urlparse(url).hostname or ""
+    if not pinned_ip:
+        raise RuntimeError("Fiery API requires a certificate pinned to the Fiery address.")
+    assert_pinned_peer(pinned_ip, host)
+    if urlparse(url).path not in API_PATHS:
+        raise RuntimeError("Refusing a Fiery call that is not login or a hold submission.")
+    content_type, body = _job_body(payload, pdf)
+    request_headers = {"Content-Type": content_type}
+    if headers:
+        request_headers.update(headers)
+    status, _payload = _pinned_request(host, "POST", urlparse(url).path, body, request_headers, timeout)
+    return status
+
+
+def interpret_hold_report(report):
+    """A connector report may confirm a hold. A print, release, or unconfirmed method is refused."""
+    if not isinstance(report, dict):
+        return _failed("", "The connector report was empty.")
+    if report.get("printed") is True or report.get("released") is True or report.get("release") is True:
+        return _failed("", "Refused a print or release. The job stays on HOLD.")
+    method = str(report.get("method") or "")
+    if method not in CONFIRMED_METHODS:
+        method = ""
+    if report.get("ok") is True and report.get("held") is True and method:
+        return _confirmed(method)
+    if report.get("ok") is True and report.get("held") is True:
+        return _failed("", "The hold was not confirmed by the Fiery Hold queue.")
+    return _failed(method, report.get("error") or "Fiery did not accept the hold.")
+
+
+def _write_hold_folder(folder, filename, pdf):
+    root = Path(folder).resolve()
+    hold = root / "Hold"
+    hold.mkdir(parents=True, exist_ok=True)
+    safe = pdf_filename(filename)
+    target = (hold / safe).resolve()
+    if hold.resolve() not in target.parents:
+        raise ValueError("path")
+    target.write_bytes(pdf)
+    if target.read_bytes() != pdf:
+        raise RuntimeError("The Hold folder did not confirm the file.")

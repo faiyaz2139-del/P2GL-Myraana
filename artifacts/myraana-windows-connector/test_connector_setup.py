@@ -1,6 +1,7 @@
 import importlib.util
 import os
 import pathlib
+import socket
 import threading
 import unittest
 import urllib.error
@@ -302,6 +303,13 @@ class ConnectorSetupTests(unittest.TestCase):
         self.assertIn("should_reconnect", source)
         self.assertIn('"capabilities": reported_capabilities()', source)
         self.assertEqual(connector.reported_capabilities(), ["fiery_hold"])
+        fiery_frontend = frontend.with_name("fiery_hold.py")
+        fiery_mirror = pathlib.Path(__file__).with_name("fiery_hold.py")
+        if fiery_frontend.exists() and fiery_frontend.resolve() != fiery_mirror.resolve():
+            self.assertEqual(fiery_frontend.read_bytes(), fiery_mirror.read_bytes())
+        self.assertIn("load_fiery_credentials", source)
+        self.assertIn("job_name=item.get(\"jobName\")", source)
+        self.assertNotIn("opener=opener or fiery.fiery_opener", source)
 
     def test_closing_the_window_keeps_the_heartbeat(self):
         class Root:
@@ -430,6 +438,133 @@ class ConnectorSetupTests(unittest.TestCase):
         self.assertEqual([item.text for item in menu.items], ["Open", "Scan again", "Start with Windows", "Quit"])
         self.assertTrue(menu.items[0].default)
         self.assertTrue(menu.items[2].checked(None))
+
+    def test_lpr_hold_queue_names_the_job_and_refuses_print(self):
+        fiery = connector.load_fiery_hold()
+        pdf = b"%PDF-1.4 p2gl-hold"
+        port, received, thread = _serve_lpr((0, 0, 0, 0, 0))
+
+        def send(address, data, job_name, filename, timeout, queue="hold"):
+            return fiery.send_lpr(address, data, job_name, filename, timeout, queue, port)
+
+        outcome = fiery.submit_hold(
+            "127.0.0.1",
+            "card_PRINT_READY.pdf",
+            "London BC",
+            "Matte",
+            pdf,
+            job_name="RA",
+            job_id="job-42",
+            timeout=3,
+            lpr=send,
+            ipp=_transport_down,
+            smb=_transport_down,
+        )
+        thread.join(5)
+        self.assertEqual(outcome["ok"], True)
+        self.assertEqual(outcome["method"], "lpr")
+        self.assertIs(outcome["printed"], False)
+        self.assertIs(outcome["held"], True)
+        self.assertEqual(received["commands"][0], b"\x02hold")
+        self.assertNotIn(b"\x02print", b" ".join(received["commands"]))
+        self.assertNotIn(b"\x02direct", b" ".join(received["commands"]))
+        self.assertIn(b"JRA job-42\n", received["control"])
+        self.assertEqual(received["data"], pdf)
+        self.assertEqual(received["data_zero"], b"\x00")
+        for queue in ("print", "direct"):
+            refused = fiery.submit_hold(
+                "192.168.0.200", "card_PRINT_READY.pdf", "London BC", "Matte", pdf,
+                queue=queue, lpr=_transport_down, ipp=_transport_down, smb=_transport_down, api=_transport_down,
+            )
+            self.assertIs(refused["ok"], False)
+            self.assertIs(refused["printed"], False)
+            self.assertIn("Refusing to print", refused["error"])
+        self.assertIsNone(fiery.fiery_credentials({"apiKey": "k", "username": "u"}))
+        self.assertEqual(
+            fiery.smb_hold_unc("192.168.0.200", "card_PRINT_READY.pdf"),
+            "\\\\192.168.0.200\\hold\\card_PRINT_READY.pdf",
+        )
+
+
+def _transport_down(*_args, **_kwargs):
+    raise RuntimeError("down")
+
+
+def _serve_lpr(acks):
+    received = {}
+    ready = threading.Event()
+    port = []
+
+    def run():
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        server.settimeout(5)
+        port.append(server.getsockname()[1])
+        ready.set()
+        try:
+            conn, _addr = server.accept()
+        except socket.timeout:
+            server.close()
+            return
+        conn.settimeout(5)
+        buffer = bytearray()
+
+        def read(count):
+            while len(buffer) < count:
+                chunk = conn.recv(max(1, count - len(buffer)))
+                if not chunk:
+                    raise RuntimeError("closed")
+                buffer.extend(chunk)
+            out = bytes(buffer[:count])
+            del buffer[:count]
+            return out
+
+        def read_line():
+            while b"\n" not in buffer:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    raise RuntimeError("closed")
+                buffer.extend(chunk)
+            index = buffer.index(b"\n")
+            line = bytes(buffer[:index])
+            del buffer[: index + 1]
+            return line
+
+        try:
+            commands = []
+            for step, take_body in ((0, False), (1, True), (3, True)):
+                line = read_line()
+                commands.append(line)
+                conn.sendall(bytes([acks[step]]))
+                if acks[step] != 0:
+                    break
+                if not take_body:
+                    continue
+                count = int(line[1:].split(b" ", 1)[0])
+                body = read(count)
+                marker = read(1)
+                if step == 1:
+                    received["control"] = body
+                    conn.sendall(bytes([acks[2]]))
+                    if acks[2] != 0:
+                        break
+                else:
+                    received["data"] = body
+                    received["data_zero"] = marker
+                    conn.sendall(bytes([acks[4]]))
+            received["commands"] = commands
+        finally:
+            conn.close()
+            server.close()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    if not ready.wait(5):
+        raise RuntimeError("LPR test server did not start")
+    return port[0], received, thread
+
 
 if __name__ == "__main__":
     unittest.main()

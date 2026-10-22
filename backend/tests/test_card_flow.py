@@ -1,4 +1,6 @@
 """Business-card flow: defaults, queue pages, and a Fiery hold that never prints."""
+import socket
+import threading
 from pathlib import Path
 
 from p2g.card_flow import (
@@ -21,7 +23,21 @@ from p2g.card_flow import (
     shop_cardstock,
     specs_known,
 )
-from p2g.fiery_hold import hold_payload, interpret_hold_report, submit_hold
+from p2g.fiery_hold import (
+    assert_pinned_peer,
+    build_ipp_print_job,
+    fiery_credentials,
+    hold_ipp_paths,
+    hold_payload,
+    hold_queue_name,
+    interpret_hold_report,
+    ipp_confirmed,
+    job_label,
+    send_lpr,
+    send_smb,
+    smb_hold_unc,
+    submit_hold,
+)
 from p2g.london_card import STOP_PRESET, london_business_card_recipe
 
 
@@ -203,30 +219,289 @@ def test_known_finish_answers_stock_and_a_hold_leaves_duplo_without_printing():
     assert stock_job["productionChecklist"][0]["status"] == "done"
 
 
-def test_fiery_hold_never_prints_and_falls_back_to_a_hold_folder(tmp_path=None):
+def _down(*_args, **_kwargs):
+    raise RuntimeError("down")
+
+
+def _serve_lpr(acks):
+    """A one-connection RFC 1179 server. acks are the five acknowledgement bytes."""
+    received = {}
+    ready = threading.Event()
+    port = []
+
+    def run():
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        server.settimeout(5)
+        port.append(server.getsockname()[1])
+        ready.set()
+        try:
+            conn, _addr = server.accept()
+        except socket.timeout:
+            server.close()
+            return
+        conn.settimeout(5)
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        buffer = bytearray()
+
+        def read(count):
+            while len(buffer) < count:
+                chunk = conn.recv(max(1, count - len(buffer)))
+                if not chunk:
+                    raise RuntimeError("closed")
+                buffer.extend(chunk)
+            out = bytes(buffer[:count])
+            del buffer[:count]
+            return out
+
+        def read_line():
+            while b"\n" not in buffer:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    raise RuntimeError("closed")
+                buffer.extend(chunk)
+            index = buffer.index(b"\n")
+            line = bytes(buffer[:index])
+            del buffer[: index + 1]
+            return line
+
+        try:
+            commands = []
+            for step, take_body in ((0, False), (1, True), (3, True)):
+                line = read_line()
+                commands.append(line)
+                conn.sendall(bytes([acks[step]]))
+                if acks[step] != 0:
+                    break
+                if not take_body:
+                    continue
+                count = int(line[1:].split(b" ", 1)[0])
+                body = read(count)
+                marker = read(1)
+                if step == 1:
+                    received["control"] = body
+                    received["control_zero"] = marker
+                    conn.sendall(bytes([acks[2]]))
+                    if acks[2] != 0:
+                        break
+                else:
+                    received["data"] = body
+                    received["data_zero"] = marker
+                    conn.sendall(bytes([acks[4]]))
+            received["commands"] = commands
+        finally:
+            conn.close()
+            server.close()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    assert ready.wait(5)
+    return port[0], received, thread
+
+
+def _lpr_on(port):
+    def send(address, pdf, job_name, filename, timeout, queue="hold"):
+        return send_lpr(address, pdf, job_name, filename, timeout, queue, port)
+
+    return send
+
+
+def test_print_and_direct_queues_are_refused_before_any_connection():
+    calls = []
+
+    def connect(address, pdf, job_name, filename, timeout, queue="hold"):
+        calls.append(queue)
+        raise AssertionError(queue)
+
+    for queue in ("print", "direct", "PRINT", "Direct", "hold\nprint", "print_hold"):
+        outcome = submit_hold(
+            "192.168.0.200",
+            "card_PRINT_READY.pdf",
+            "London BC",
+            "Matte",
+            b"%PDF",
+            queue=queue,
+            lpr=connect,
+            ipp=connect,
+            smb=connect,
+            api=connect,
+        )
+        assert outcome["ok"] is False
+        assert outcome["held"] is False
+        assert outcome["printed"] is False
+        assert "Refusing to print" in outcome["error"]
+        assert "Nothing was printed" in outcome["error"]
+    assert calls == []
+    for queue in ("print", "direct"):
+        try:
+            hold_queue_name(queue)
+        except RuntimeError as error:
+            assert "Only the hold queue" in str(error)
+        else:
+            raise AssertionError(queue)
+    assert hold_ipp_paths() == ("/ipp/hold", "/hold")
+    assert smb_hold_unc("192.168.0.200", "card_PRINT_READY.pdf") == "\\\\192.168.0.200\\hold\\card_PRINT_READY.pdf"
+    try:
+        smb_hold_unc("192.168.0.200", "card_PRINT_READY.pdf", queue="direct")
+    except RuntimeError as error:
+        assert "Refusing to print" in str(error)
+    else:
+        raise AssertionError("direct share")
+
+
+def test_lpr_hold_queue_confirms_the_job_name_and_a_refused_ack_does_not():
+    pdf = b"%PDF-1.4 hold-me"
+    port, received, thread = _serve_lpr((0, 0, 0, 0, 0))
+    used = {"ipp": 0}
+
+    def ipp(*_args, **_kwargs):
+        used["ipp"] += 1
+        raise RuntimeError("ipp should not run")
+
+    outcome = submit_hold(
+        "127.0.0.1",
+        "card_PRINT_READY.pdf",
+        "London BC",
+        "Matte",
+        pdf,
+        job_name="RA",
+        job_id="job-42",
+        timeout=3,
+        lpr=_lpr_on(port),
+        ipp=ipp,
+        smb=_down,
+    )
+    thread.join(5)
+    assert outcome == {"ok": True, "held": True, "printed": False, "method": "lpr", "error": ""}
+    assert used["ipp"] == 0
+    assert received["commands"][0] == b"\x02hold"
+    assert all(not command.startswith(b"\x02print") and not command.startswith(b"\x02direct") for command in received["commands"])
+    control = received["control"].decode("utf-8")
+    assert "JRA job-42\n" in control
+    assert "NRA job-42.pdf\n" in control
+    assert "\nldfA" in control or control.startswith("ldfA") or "\nl" in control
+    assert received["control_zero"] == b"\x00"
+    assert received["data"] == pdf
+    assert received["data_zero"] == b"\x00"
+    assert job_label("RA", "job-42", "card_PRINT_READY.pdf") == "RA job-42"
+
+    port, refused, thread = _serve_lpr((0, 0, 0, 0, 1))
+    failed = submit_hold(
+        "127.0.0.1",
+        "card_PRINT_READY.pdf",
+        "London BC",
+        "Matte",
+        pdf,
+        job_name="RA",
+        job_id="job-42",
+        timeout=3,
+        lpr=_lpr_on(port),
+        ipp=_down,
+        smb=_down,
+    )
+    thread.join(5)
+    assert failed["ok"] is False
+    assert failed["held"] is False
+    assert failed["printed"] is False
+    assert "Nothing was printed" in failed["error"]
+    assert interpret_hold_report(failed)["ok"] is False
+    assert refused.get("data") == pdf
+
+
+def test_ipp_and_smb_stay_on_hold_and_api_waits_for_a_pinned_login():
+    body = build_ipp_print_job("ipp://192.168.0.200/ipp/hold", "RA job-42", b"%PDF")
+    assert b"ipp://192.168.0.200/ipp/hold" in body
+    assert b"/print" not in body
+    assert b"/direct" not in body
+    assert b"RA job-42" in body
+    assert b"job-hold-until" in body
+    assert b"indefinite" in body
+    assert body.endswith(b"%PDF")
+    assert ipp_confirmed(200, bytes([1, 1, 0, 0, 0, 0, 0, 1])) is True
+    assert ipp_confirmed(200, bytes([1, 1, 0x04, 0x00, 0, 0, 0, 1])) is False
+    assert ipp_confirmed(500, bytes([1, 1, 0, 0, 0, 0, 0, 1])) is False
+    assert ipp_confirmed(200, b"") is False
+    try:
+        build_ipp_print_job("ipp://192.168.0.200/ipp/print", "RA", b"%PDF")
+    except RuntimeError as error:
+        assert "Refusing to print" in str(error)
+    else:
+        raise AssertionError("print uri")
+
     seen = {}
 
-    def opener(url, payload, pdf, timeout):
-        seen["url"] = url
-        seen["payload"] = payload
-        seen["pdf"] = pdf
-        return 500
+    def copy(path, data):
+        seen["path"] = path
+        seen["data"] = data
 
-    refused = submit_hold("10.0.0.8", "card_PRINT_READY.pdf", "London BC", "14pt matte", b"%PDF", opener=opener)
-    assert refused["ok"] is False and refused["printed"] is False
-    assert seen["payload"]["queue"] == "hold"
-    assert seen["payload"]["print"] is False and seen["payload"]["release"] is False
-    assert seen["url"].endswith("/live/api/v5/jobs")
+    saved = send_smb("192.168.0.200", b"%PDF-smb", "card_PRINT_READY.pdf", 3, copy=copy)
+    assert saved["method"] == "smb" and saved["printed"] is False
+    assert seen == {"path": "\\\\192.168.0.200\\hold\\card_PRINT_READY.pdf", "data": b"%PDF-smb"}
+
+    calls = []
+
+    def api(address, pdf, payload, credentials, timeout):
+        calls.append((address, credentials["username"], payload["queue"], payload["print"], pdf))
+        return {"ok": True, "held": True, "printed": False, "method": "api", "error": ""}
+
+    missing = submit_hold(
+        "192.168.0.200",
+        "card_PRINT_READY.pdf",
+        "London BC",
+        "Matte",
+        b"%PDF",
+        lpr=_down,
+        ipp=_down,
+        smb=_down,
+        api=api,
+        opener=lambda *args: calls.append("opener"),
+    )
+    assert missing["ok"] is False and calls == []
+    assert fiery_credentials({"apiKey": "key", "username": "user"}) is None
+    ready = submit_hold(
+        "192.168.0.200",
+        "card_PRINT_READY.pdf",
+        "London BC",
+        "Matte",
+        b"%PDF",
+        lpr=_down,
+        ipp=_down,
+        smb=_down,
+        api=api,
+        credentials={"apiKey": "key", "username": "admin", "password": "secret"},
+    )
+    assert ready["ok"] is True and ready["method"] == "api" and ready["printed"] is False
+    assert calls == [("192.168.0.200", "admin", "hold", False, b"%PDF")]
+    assert_pinned_peer("192.168.0.200", "192.168.0.200")
+    try:
+        assert_pinned_peer("192.168.0.200", "10.0.0.8")
+    except RuntimeError as error:
+        assert "not pinned" in str(error)
+    else:
+        raise AssertionError("pin")
+
+
+def test_unconfirmed_hold_is_not_delivered_and_a_folder_still_requires_the_bytes():
+    assert interpret_hold_report({"ok": True, "held": True, "printed": True})["ok"] is False
+    assert interpret_hold_report({"ok": True, "held": True, "method": "lpr"})["method"] == "lpr"
+    assert interpret_hold_report({"ok": True, "held": True})["ok"] is False
+    assert interpret_hold_report({"ok": True, "held": True, "method": "print"})["ok"] is False
+    assert hold_payload("x.pdf", "London BC", "Matte")["release"] is False
+    assert hold_payload("x.pdf", "London BC", "Matte")["queue"] == "hold"
     folder = ROOT / "backend" / "tests" / "_hold_tmp"
     folder.mkdir(exist_ok=True)
     try:
         saved = submit_hold(
-            "10.0.0.8",
+            "192.168.0.200",
             "card_PRINT_READY.pdf",
             "London BC",
             "Matte",
             b"%PDF-hold",
-            opener=opener,
+            lpr=_down,
+            ipp=_down,
+            smb=_down,
             hot_folder=str(folder),
         )
         assert saved == {"ok": True, "held": True, "printed": False, "method": "hot-folder", "error": ""}
@@ -241,8 +516,15 @@ def test_fiery_hold_never_prints_and_falls_back_to_a_hold_folder(tmp_path=None):
             hold_dir.rmdir()
         if folder.exists():
             folder.rmdir()
-    assert interpret_hold_report({"ok": True, "held": True, "printed": True})["ok"] is False
-    assert hold_payload("x.pdf", "London BC", "Matte")["release"] is False
+    original = (ROOT / "backend" / "p2g" / "fiery_hold.py").read_bytes()
+    shipped = (ROOT / "frontend" / "public" / "setup" / "fiery_hold.py").read_bytes()
+    mirror = (ROOT / "artifacts" / "myraana-windows-connector" / "fiery_hold.py").read_bytes()
+    assert original == shipped == mirror
+    pairing = (ROOT / "backend" / "p2g" / "connector_pairing.py").read_text(encoding="utf-8")
+    assert '"jobName": job_label(' in pairing
+    assert "hold_method_label" in pairing
+    ui = (ROOT / "frontend" / "src" / "App.js").read_text(encoding="utf-8")
+    assert 'data-testid="fiery-hold-error"' in ui
 
 
 def test_operator_clicks_drop_when_the_proof_path_is_automatic():

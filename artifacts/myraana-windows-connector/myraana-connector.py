@@ -81,6 +81,34 @@ def forget_secret(name):
         return
 
 
+def load_fiery_credentials():
+    """Optional Fiery API login. Blank means the Hold queue is used on its own."""
+    try:
+        api_key = secret("fiery-api-key") or ""
+        username = secret("fiery-username") or ""
+        password = secret("fiery-password") or ""
+    except Exception:
+        return None
+    return load_fiery_hold().fiery_credentials(
+        {"apiKey": api_key, "username": username, "password": password}
+    )
+
+
+def remember_fiery_login(api_key, username, password):
+    """Save a complete API login. Blank fields keep whatever was already saved."""
+    api_key = str(api_key or "").strip()
+    username = str(username or "").strip()
+    password = str(password or "")
+    if not api_key or not username or not password.strip():
+        return
+    try:
+        secret("fiery-api-key", api_key)
+        secret("fiery-username", username)
+        secret("fiery-password", password)
+    except Exception:
+        return
+
+
 def normalize_code(value):
     """Pairing codes are shown in groups. Spaces and dashes are not part of the code."""
     return str(value or "").upper().replace(" ", "").replace("-", "").strip()
@@ -252,8 +280,11 @@ def perform_holds(api_url, credential, result, opener=None):
                 preset=item.get("preset") or "London BC",
                 stock=item.get("stock") or "",
                 pdf=pdf,
-                opener=opener or fiery.fiery_opener,
+                job_name=item.get("jobName") or "",
+                job_id=item.get("jobId") or "",
+                credentials=load_fiery_credentials(),
                 hot_folder=item.get("hotFolder") or None,
+                opener=opener,
             )
         except Exception:
             outcome = {
@@ -480,7 +511,12 @@ def run(url=None, code=None, report=print, stop=None, scan_now=None):
                 if reports:
                     request(api_url, "/connector-devices/heartbeat",
                             {"inventory": found, "holds": reports}, credential)
-                    report("Sent the PRINT_READY file to the Fiery hold queue. It was not printed.")
+                    failed = [item for item in reports if not item.get("ok") or not item.get("held")]
+                    if failed:
+                        report(failed[0].get("error") or "The Fiery Hold queue did not confirm the file. Nothing was printed.")
+                    else:
+                        methods = ", ".join(sorted({str(item.get("method") or "hold") for item in reports}))
+                        report(f"Sent the PRINT_READY file to the Fiery hold queue via {methods}. It was not printed.")
             else:
                 if not state.get("pairingId"):
                     if not code:
@@ -540,7 +576,7 @@ def setup_window(self_test=False):
 
     root = tk.Tk()
     root.title("Myraana Connector")
-    root.geometry("560x430")
+    root.geometry("560x680")
     root.resizable(False, False)
     frame = ttk.Frame(root, padding=24)
     frame.pack(fill="both", expand=True)
@@ -556,6 +592,24 @@ def setup_window(self_test=False):
     code = tk.StringVar(value=os.environ.get("MYRAANA_PAIRING_CODE", ""))
     code_entry = ttk.Entry(frame, textvariable=code, width=64)
     code_entry.pack(fill="x", pady=(4, 12))
+    ttk.Label(frame, text="Fiery API (optional)").pack(anchor="w")
+    ttk.Label(
+        frame,
+        text="Leave blank to send the PDF to the Fiery Hold queue. Fill in an API key, user, and password only if this Fiery requires them.",
+        wraplength=500,
+    ).pack(anchor="w", pady=(4, 8))
+    ttk.Label(frame, text="Fiery API key").pack(anchor="w")
+    fiery_key = tk.StringVar()
+    fiery_key_entry = ttk.Entry(frame, textvariable=fiery_key, width=64)
+    fiery_key_entry.pack(fill="x", pady=(4, 8))
+    ttk.Label(frame, text="Fiery user").pack(anchor="w")
+    fiery_user = tk.StringVar()
+    fiery_user_entry = ttk.Entry(frame, textvariable=fiery_user, width=64)
+    fiery_user_entry.pack(fill="x", pady=(4, 8))
+    ttk.Label(frame, text="Fiery password").pack(anchor="w")
+    fiery_password = tk.StringVar()
+    fiery_password_entry = ttk.Entry(frame, textvariable=fiery_password, width=64, show="\u2022")
+    fiery_password_entry.pack(fill="x", pady=(4, 12))
     status = tk.StringVar(value="Ready to connect.")
     events = queue.Queue()
     stop = threading.Event()
@@ -578,9 +632,13 @@ def setup_window(self_test=False):
             status.set(str(error))
             return
         stop.clear()
+        remember_fiery_login(fiery_key.get(), fiery_user.get(), fiery_password.get())
         button.configure(state="disabled")
         url_entry.configure(state="disabled")
         code_entry.configure(state="disabled")
+        fiery_key_entry.configure(state="disabled")
+        fiery_user_entry.configure(state="disabled")
+        fiery_password_entry.configure(state="disabled")
         status.set("Connecting...")
         pairing_code = code.get()
         code.set("")
@@ -604,6 +662,9 @@ def setup_window(self_test=False):
                     button.configure(state="normal")
                     url_entry.configure(state="normal")
                     code_entry.configure(state="normal")
+                    fiery_key_entry.configure(state="normal")
+                    fiery_user_entry.configure(state="normal")
+                    fiery_password_entry.configure(state="normal")
         except queue.Empty:
             pass
         root.after(200, poll)
