@@ -950,7 +950,7 @@ function ConnectorPairing({ settings, reload }) {
   };
   return <section className="settings-card" data-testid="connector-pairing-panel">
     <div className="section-heading"><h3>Connect Windows Connector</h3><Link2 /></div>
-    <p data-testid="connector-pairing-scope">This code pairs a connector for this shop only. Discovery is read-only. It cannot print, change printer settings, or release jobs.</p>
+    <p data-testid="connector-pairing-scope">This code pairs a connector for this shop only. It finds your printers and can place approved PRINT_READY files on your Fiery HOLD queue. It never prints or releases jobs.</p>
     <div className="action-row">
       <a className="button" href="https://github.com/faiyaz2139-del/P2GL-Myraana/releases/download/windows-connector-preview/MyraanaConnector.zip" data-testid="download-windows-connector-link">
         <Download size={16} />Download Windows Connector
@@ -960,7 +960,7 @@ function ConnectorPairing({ settings, reload }) {
       </a>
     </div>
     <ol className="muted"><li>On Windows, download and extract the ZIP, then open MyraanaConnector.exe. On a Mac or Linux computer that can see the press, download the script and run it with Python 3.</li><li>Click Pair connector here. Enter this website and the code in the connector window: <strong>{window.location.origin}</strong></li><li>Click Connect, then Approve below. The connector finds printers by itself. You do not type a printer name.</li></ol>
-    <p className="muted">Windows 10/11 only · Preview version · No Python or PowerShell setup required.</p>
+    <p className="muted">Windows 10/11 only · No Python or PowerShell setup required.</p>
     <button className="primary" onClick={start} data-testid="start-connector-pairing-button">
       Pair connector
     </button>
