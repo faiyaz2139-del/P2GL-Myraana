@@ -30,6 +30,7 @@ TENANT_COLLECTIONS = frozenset({
     "assistant_leases",
     "sessions",
     "invites",
+    "password_resets",
 })
 
 _shop = ContextVar("myraana_shop", default=None)

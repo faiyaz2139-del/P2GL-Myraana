@@ -15,9 +15,9 @@ This pass does not deploy, does not touch production data, and does not change h
 
 Every shop-owned query goes through `TenantDatabase` in `backend/p2g/tenancy.py`. The signed-in user’s `shop_id` is applied to reads and writes. A request with no shop is rejected. `SAAS_TENANT_ISOLATION` does not turn that off. The live Print2Go install keeps working because existing rows are stamped `shop_id: "print2go"`.
 
-Shop-owned collections: users, jobs, settings, recipes, connector pairings, connector devices, connector state, executions, cost profiles, machine capabilities, assistant leases, sessions, and invites. Chat messages and the job audit trail stay on the job, so they follow the job’s shop. GridFS `pdf_files` metadata gets `shop_id`, and a download checks that metadata against the job before any bytes are returned. Chunks are not tagged; the file API is the only read path.
+Shop-owned collections: users, jobs, settings, recipes, connector pairings, connector devices, connector state, executions, cost profiles, machine capabilities, assistant leases, sessions, invites, and password resets. Chat messages and the job audit trail stay on the job, so they follow the job’s shop. GridFS `pdf_files` metadata gets `shop_id`, and a download checks that metadata against the job before any bytes are returned. Chunks are not tagged; the file API is the only read path.
 
-These stay global: the `shops` directory itself, early-access leads, the first-run bootstrap lock, and connector nonces. The print2go.com catalog JSON is a shared preset library. The recipes a shop saves are private. Billing is still one server-wide switch, left off, with a `billing.enabled: false` placeholder on the shop document. Checkout still returns 503.
+These stay global: the `shops` directory itself, early-access leads, the first-run bootstrap lock, connector nonces, and password-reset attempt counters. The print2go.com catalog JSON is a shared preset library. The recipes a shop saves are private. Billing is still one server-wide switch, left off, with a `billing.enabled: false` placeholder on the shop document. Checkout still returns 503.
 
 Email is unique per shop, not across the whole database. The same address can belong to two shops. Sign-in then asks for the shop address (the slug) and does not list the other shop’s name. A platform administrator’s email cannot also be a shop email.
 
@@ -41,7 +41,7 @@ After that boot, confirm a Print2Go user can still sign in and open a job before
 
 When both flags are on, signup creates a shop, an `admin` owner, the default artwork rules, and the business-card and flyer presets, then sets the session cookie. The lead is stored without the password.
 
-Shop administrators invite an operator or another shop administrator with `POST /api/invites`. The response includes a one-time token. The link is `/login?invite=TOKEN` so the existing Caddy routes do not need a new path. There is no outbound email. Accepting the invite creates the user in that shop only. The invite cannot grant `superadmin`.
+Shop administrators invite an operator or another shop administrator with `POST /api/invites`. The response includes a one-time token. The link is `/login?invite=TOKEN` so the existing Caddy routes do not need a new path. The same link is emailed when a provider is configured. `EMAIL_PROVIDER` defaults to `log`, which writes the message to the server log and still returns the token so the administrator can copy it. `off` does not send. `smtp`, `resend`, `postmark`, and `ses` deliver and do not log the body. A failed send still returns the token. `GET /api/invites` lists pending invites without the token hash. Resend rotates the token and the expiry. Revoke marks the invite unusable. Accepting a revoked, accepted, or expired invite fails. The invite cannot grant `superadmin`.
 
 `POST /api/auth/platform-setup` creates one platform `superadmin` when the `X-Platform-Setup-Token` header matches `PLATFORM_SETUP_TOKEN`. If the variable is unset, the route returns 503. Nobody is promoted automatically, including the Print2Go administrator. `GET /api/platform/shops` returns id, name, slug, and created time for that role only. A superadmin who opens the studio is told this is not a shop workspace and is not given another shop’s jobs.
 
@@ -49,7 +49,9 @@ The shared `CONNECTOR_SECRET` is bound to Print2Go only. A paired device credent
 
 ## Auth and roles
 
-Operators can run jobs in their own shop. Shop administrators can change that shop’s settings, artwork rules, recipes, verified printers, operators, invites, and cost inputs. Platform administrators are separate and cannot use those shop routes. There is no password reset and no SSO. Self-serve shop creation stays off until both flags are on.
+Operators can run jobs in their own shop. Shop administrators can change that shop’s settings, artwork rules, recipes, verified printers, operators, invites, and cost inputs. Platform administrators are separate and cannot use those shop routes. There is no SSO. Self-serve shop creation stays off until both flags are on.
+
+Password reset is `POST /api/public/password-reset` with the email and the shop address. The response is the same sentence whether or not that shop has the address. An empty shop address does not pick a shop. The token is stored as a hash, expires in one hour, and works once. The page is `/login?reset=TOKEN`. Five requests per email and shop in an hour return 429. The limit counts attempts even when no account exists, so the 429 does not reveal that an address is missing. A platform administrator is not reset through this path. A shop that is not active does not receive a reset email, and the public reply stays the same.
 
 ## Billing
 
@@ -144,4 +146,4 @@ Also not built, on purpose:
 - Email: leads are stored in MongoDB only. There is no mailbox, no “from” address, and no password-reset mail. Do not invent a Myraana support address. Print2Go London’s published store address stays on print2go.com.
 - Hosting: the VM size, who holds MongoDB, and the window to copy production data off Emergent.
 - Legal: Privacy and Terms in the site are drafts. Replace them before another shop relies on them.
-- Second shop go-live, after a copy of the database has been booted with this build and Print2Go sign-in still works. Flags stay off until that check. Still missing before that is safe: invite email (the admin copies a link), password reset, per-shop Stripe (billing stays global and off), a data export or delete tool, and finished legal text. New shops use a paired connector; the shared connector secret stays Print2Go’s. GridFS chunks are not tagged. The platform role has an API and a blocked studio page, not a shop-management screen. Hosting, DNS, and email remain on hold.
+- Second shop go-live, after a copy of the database has been booted with this build and Print2Go sign-in still works. Flags stay off until that check. Invite email and password reset exist; a live mailbox still needs `EMAIL_PROVIDER` set to smtp, resend, postmark, or ses, because the default is log. Still missing before that is safe: per-shop Stripe (billing stays global and off), a data export or delete tool, and finished legal text. New shops use a paired connector; the shared connector secret stays Print2Go’s. GridFS chunks are not tagged. The platform role has an API and a blocked studio page, not a shop-management screen. Hosting and DNS remain on hold.

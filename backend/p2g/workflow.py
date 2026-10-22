@@ -181,6 +181,8 @@ async def ensure_collections():
         await db.leads.create_index("email")
         await db.leads.create_index("created")
         await db.invites.create_index("token_hash")
+        await db.password_resets.create_index("token_hash")
+        await db.auth_attempts.create_index("created")
         await db.bootstrap.update_one(
             {"_id": "first-run"},
             {"$setOnInsert": {"configured": False, "created": now()}},

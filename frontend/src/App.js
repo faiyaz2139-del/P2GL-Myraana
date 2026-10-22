@@ -74,13 +74,18 @@ function Badge({ status }) {
 
 function Auth({ auth, onSignedIn }) {
   const [params] = useSearchParams();
+  const navigate = useNavigate();
   const invite = params.get("invite") || "";
+  const resetToken = invite ? "" : (params.get("reset") || "");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [forgot, setForgot] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const submit = async (event) => {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formNode = event.currentTarget;
+    const form = new FormData(formNode);
     setBusy(true);
     setError("");
     try {
@@ -110,12 +115,64 @@ function Auth({ auth, onSignedIn }) {
     }
   };
 
-  const heading = invite ? "Join your shop" : auth.needsSetup ? "Set up your shop" : "Welcome back";
+  const requestReset = async (event) => {
+    event.preventDefault();
+    const formNode = event.currentTarget;
+    const form = new FormData(formNode);
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await api("public/password-reset", {
+        method: "POST",
+        body: JSON.stringify({ email: form.get("email"), shop: form.get("shop") || "" }),
+      });
+      setNotice(result.message);
+    } catch (reason) {
+      setError(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmReset = async (event) => {
+    event.preventDefault();
+    const formNode = event.currentTarget;
+    const form = new FormData(formNode);
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api("public/password-reset/confirm", {
+        method: "POST",
+        body: JSON.stringify({ token: resetToken, password: form.get("password") }),
+      });
+      setNotice(result.message);
+      navigate("/login", { replace: true });
+    } catch (reason) {
+      setError(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const heading = invite
+    ? "Join your shop"
+    : resetToken
+      ? "Choose a new password"
+      : forgot
+        ? "Reset your password"
+        : auth.needsSetup
+          ? "Set up your shop"
+          : "Welcome back";
   const intro = invite
     ? "Choose a password to accept this invite. It only joins the shop that sent it."
-    : auth.needsSetup
-      ? "Create the first administrator account."
-      : "Sign in to continue your production work.";
+    : resetToken
+      ? "This link works once. After you save, sign in with the new password."
+      : forgot
+        ? "Enter the email and the shop address. We reply the same way whether or not that account exists."
+        : auth.needsSetup
+          ? "Create the first administrator account."
+          : "Sign in to continue your production work.";
 
   return <div className="auth-shell" data-testid="auth-screen">
     <div className="auth-art">
@@ -134,7 +191,33 @@ function Auth({ auth, onSignedIn }) {
       <h2>{heading}</h2>
       <p className="muted">{intro}</p>
       {error && <div className="notice warning" role="alert" data-testid="auth-error">{error}</div>}
-      <form onSubmit={submit} data-testid={invite ? "invite-accept-form" : "auth-form"}>
+      {notice && <div className="notice" role="status" data-testid="auth-notice">{notice}</div>}
+      {resetToken && <form onSubmit={confirmReset} data-testid="reset-confirm-form">
+        <label>New password
+          <input name="password" required type="password" minLength="12" maxLength="200"
+            autoComplete="new-password" data-testid="reset-password-input" placeholder="At least 12 characters" />
+        </label>
+        <button className="primary wide" disabled={busy} data-testid="reset-confirm-button">
+          {busy ? "Saving…" : "Save password"}
+        </button>
+      </form>}
+      {!resetToken && forgot && <form onSubmit={requestReset} data-testid="reset-request-form">
+        <label>Email
+          <input name="email" required type="email" autoComplete="username"
+            data-testid="reset-email-input" placeholder="you@yourshop.ca" />
+        </label>
+        <label>Shop address
+          <input name="shop" required maxLength="80" autoComplete="off"
+            data-testid="reset-shop-input" placeholder="print2go" />
+        </label>
+        <button className="primary wide" disabled={busy} data-testid="reset-request-button">
+          {busy ? "Sending…" : "Send reset link"}
+        </button>
+        <button type="button" className="text-button" data-testid="reset-back-button" onClick={() => { setForgot(false); setNotice(""); setError(""); }}>
+          Back to sign in
+        </button>
+      </form>}
+      {!resetToken && !forgot && <form onSubmit={submit} data-testid={invite ? "invite-accept-form" : "auth-form"}>
         {(auth.needsSetup || invite) && <label>Your name
           <input name="name" required maxLength="80" autoComplete="name"
             data-testid="setup-name-input" placeholder="Shop administrator" />
@@ -155,7 +238,10 @@ function Auth({ auth, onSignedIn }) {
         <button className="primary wide" disabled={busy} data-testid="auth-submit-button">
           {busy ? "Saving…" : invite ? "Join shop" : auth.needsSetup ? "Create shop account" : "Sign in"}
         </button>
-      </form>
+      </form>}
+      {!invite && !resetToken && !forgot && !auth.needsSetup && <button type="button" className="text-button" data-testid="forgot-password-button" onClick={() => { setForgot(true); setError(""); }}>
+        Forgot password?
+      </button>}
       <p className="tiny"><ShieldCheck size={14} />Files and approvals stay in your shop.</p>
     </main>
   </div>;
@@ -718,7 +804,16 @@ function Operators() {
   const [message, setMessage] = useState("");
   const [inviteMessage, setInviteMessage] = useState("");
   const [inviteLink, setInviteLink] = useState("");
+  const [pending, setPending] = useState([]);
   const [busy, setBusy] = useState(false);
+  const loadInvites = async () => {
+    try {
+      setPending(await api("invites"));
+    } catch (reason) {
+      setInviteMessage(reason.message);
+    }
+  };
+  useEffect(() => { loadInvites(); }, []);
   const submit = async (event) => {
     event.preventDefault();
     const formNode = event.currentTarget;
@@ -748,7 +843,37 @@ function Operators() {
       });
       formNode.reset();
       setInviteLink(`${window.location.origin}/login?invite=${result.token}`);
-      setInviteMessage("Invite ready. Send this link. It expires in 7 days and only joins this shop.");
+      setInviteMessage(result.emailed
+        ? "Invite emailed. The link is below if you also want to copy it. It expires in 7 days and only joins this shop."
+        : "Invite ready. Email was logged or not configured, so copy this link. It expires in 7 days and only joins this shop.");
+      await loadInvites();
+    } catch (reason) {
+      setInviteMessage(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const resend = async (id) => {
+    setBusy(true);
+    try {
+      const result = await api(`invites/${id}/resend`, { method: "POST", body: "{}" });
+      setInviteLink(`${window.location.origin}/login?invite=${result.token}`);
+      setInviteMessage(result.emailed
+        ? "Invite resent by email. The new link replaces the old one."
+        : "Invite resent. Email was logged or not configured, so copy the new link.");
+      await loadInvites();
+    } catch (reason) {
+      setInviteMessage(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const revoke = async (id) => {
+    setBusy(true);
+    try {
+      await api(`invites/${id}/revoke`, { method: "POST", body: "{}" });
+      setInviteMessage("Invite revoked. That link can no longer be used.");
+      await loadInvites();
     } catch (reason) {
       setInviteMessage(reason.message);
     } finally {
@@ -776,6 +901,13 @@ function Operators() {
     {inviteLink && <label>Invite link
       <input readOnly value={inviteLink} data-testid="invite-link" onFocus={(event) => event.target.select()} />
     </label>}
+    {!!pending.length && <ul className="plain-list" data-testid="invite-list">
+      {pending.map((item) => <li key={item.id} data-testid={`invite-row-${item.id}`}>
+        <span>{item.email} · {item.role}{item.revoked ? " · revoked" : ""}</span>
+        <button type="button" className="text-button" disabled={busy} data-testid={`invite-resend-${item.id}`} onClick={() => resend(item.id)}>Resend</button>
+        {!item.revoked && <button type="button" className="text-button" disabled={busy} data-testid={`invite-revoke-${item.id}`} onClick={() => revoke(item.id)}>Revoke</button>}
+      </li>)}
+    </ul>}
   </section>;
 }
 

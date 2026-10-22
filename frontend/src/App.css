@@ -15,3 +15,5 @@ img.brand-mark{width:40px;height:40px;border-radius:11px;background:transparent;
 .badge.connected,.badge.verified,.badge.proof-approved{color:var(--green);background:color-mix(in srgb,var(--green) 12%,var(--panel))}
 .badge.offline,.badge.not-verified,.badge.waiting-for-operator{color:var(--muted)}
 .mobile-brand .brand-name{font-size:22px}
+.plain-list{list-style:none;padding:0;margin:12px 0 0;display:grid;gap:8px}
+.plain-list li{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
