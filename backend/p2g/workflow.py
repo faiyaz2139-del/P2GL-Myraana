@@ -9,6 +9,7 @@ from motor.motor_asyncio import AsyncIOMotorGridFSBucket
 from p2g.core import AppError, db, lock, new_id, now, unlock, sha256
 from p2g.pdfcheck import PdfError, inspect, make_print_ready, prepare, render_page, verify
 from p2g.present import status_label
+from p2g.account_access import SUSPENDED_MESSAGE, shop_allows_sign_in
 from p2g.tenancy import (
     PRINT2GO_SHOP_ID,
     current_shop_id,
@@ -219,6 +220,11 @@ async def current_user(request: Request):
             return None
         user = await db.users.find_one({"id": session["user_id"]}, {"_id": 0, "password": 0})
     if user and user.get("shop_id"):
+        shop = await db.shops.find_one({"_id": user["shop_id"]}, {"_id": 1, "status": 1})
+        if shop and shop_allows_sign_in(shop.get("status")):
+            user["shop_status"] = shop.get("status") or "active"
+        else:
+            user["shop_status"] = "suspended"
         activate_shop(user["shop_id"])
     return user
 
@@ -231,6 +237,8 @@ def require_user(user):
             "Platform administrators do not open a shop workspace from this page.",
             403,
         )
+    if not shop_allows_sign_in(user.get("shop_status")):
+        raise AppError(SUSPENDED_MESSAGE, 403)
     return user
 
 

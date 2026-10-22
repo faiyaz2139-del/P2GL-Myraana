@@ -911,6 +911,90 @@ function Operators() {
   </section>;
 }
 
+function PlatformScreen({ onSignedOut }) {
+  const [shops, setShops] = useState([]);
+  const [leads, setLeads] = useState([]);
+  const [message, setMessage] = useState("");
+  const [inviteLink, setInviteLink] = useState("");
+  const [busy, setBusy] = useState(false);
+  const load = async () => {
+    const [shopRows, leadRows] = await Promise.all([api("platform/shops"), api("platform/leads")]);
+    setShops(shopRows);
+    setLeads(leadRows);
+  };
+  useEffect(() => { load().catch((reason) => setMessage(reason.message)); }, []);
+  const run = async (path, created) => {
+    setBusy(true);
+    setMessage("");
+    try {
+      const result = await api(path, { method: "POST", body: "{}" });
+      if (created && result.token) {
+        setInviteLink(`${window.location.origin}/login?invite=${result.token}`);
+        setMessage(result.emailed
+          ? "Shop created and the owner invite was emailed."
+          : "Shop created. Email was logged or not configured, so copy the owner invite.");
+      } else if (created && result.already) {
+        setInviteLink("");
+        setMessage("That request already has a shop.");
+      } else {
+        setInviteLink("");
+        setMessage("Shop updated.");
+      }
+      await load();
+    } catch (reason) {
+      setMessage(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <div className="auth-shell platform-shell" data-testid="platform-screen">
+    <main className="platform-main">
+      <div className="page-heading">
+        <div>
+          <span className="eyebrow">PLATFORM</span>
+          <h1>Shops</h1>
+          <p className="muted">Status and counts only. Job files, customers, and messages stay inside each shop.</p>
+        </div>
+        <button className="text-button" data-testid="platform-sign-out-button" onClick={onSignedOut}><LogOut size={16} />Sign out</button>
+      </div>
+      {message && <p className="notice" data-testid="platform-message">{message}</p>}
+      {inviteLink && <label>Owner invite
+        <input readOnly value={inviteLink} data-testid="platform-invite-link" onFocus={(event) => event.target.select()} />
+      </label>}
+      <div className="table-wrap">
+        <table className="data-table" data-testid="platform-shops">
+          <thead>
+            <tr><th>Shop</th><th>Status</th><th>Created</th><th>Users</th><th>Jobs</th><th>Last activity</th><th></th></tr>
+          </thead>
+          <tbody>
+            {shops.map((shop) => <tr key={shop.id} data-testid={`platform-shop-${shop.id}`}>
+              <td><strong>{shop.name}</strong><div className="tiny">{shop.slug}</div></td>
+              <td data-testid={`platform-status-${shop.id}`}>{shop.status}</td>
+              <td>{shop.created ? String(shop.created).slice(0, 10) : ""}</td>
+              <td>{shop.users}</td>
+              <td>{shop.jobs}</td>
+              <td>{shop.lastActivity ? String(shop.lastActivity).slice(0, 10) : ""}</td>
+              <td className="row-actions">
+                {shop.status !== "active" && <button type="button" className="button" disabled={busy} data-testid={`platform-approve-${shop.id}`} onClick={() => run(`platform/shops/${shop.id}/approve`)}>Approve</button>}
+                {shop.status === "active" && <button type="button" className="button" disabled={busy} data-testid={`platform-suspend-${shop.id}`} onClick={() => run(`platform/shops/${shop.id}/suspend`)}>Suspend</button>}
+              </td>
+            </tr>)}
+          </tbody>
+        </table>
+      </div>
+      <h2>Requests</h2>
+      <p className="muted">Turn a signup request into a shop. The owner receives an invite and chooses their own password.</p>
+      {!leads.length && <p data-testid="platform-leads-empty">No open requests.</p>}
+      {!!leads.length && <ul className="plain-list" data-testid="platform-leads">
+        {leads.map((lead) => <li key={lead.id} data-testid={`platform-lead-${lead.id}`}>
+          <span><strong>{lead.shop}</strong> · {lead.name} · {lead.email}{lead.city ? ` · ${lead.city}` : ""}</span>
+          <button type="button" className="button" disabled={busy} data-testid={`platform-create-shop-${lead.id}`} onClick={() => run(`platform/leads/${lead.id}/approve`, true)}>Create shop</button>
+        </li>)}
+      </ul>}
+    </main>
+  </div>;
+}
+
 function Studio() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -944,10 +1028,11 @@ function Studio() {
     }
   };
   useEffect(() => { api("auth").then(setAuth).catch((reason) => setError(reason.message)); }, []);
-  useEffect(() => { if (auth?.user && auth.user.role !== "superadmin") load(); }, [auth?.user]);
+  const shopOpen = !auth?.user?.shop_status || auth.user.shop_status === "active";
+  useEffect(() => { if (auth?.user && auth.user.role !== "superadmin" && shopOpen) load(); }, [auth?.user, shopOpen]);
   useEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
   useEffect(() => {
-    if (!auth?.user || view !== "jobs") return undefined;
+    if (!auth?.user || !shopOpen || auth.user.role === "superadmin" || view !== "jobs") return undefined;
     if (!jobId) {
       setJob(null);
       return undefined;
@@ -955,7 +1040,7 @@ function Studio() {
     let cancelled = false;
     api(`jobs/${jobId}`).then((detail) => { if (!cancelled) setJob(detail); }).catch((reason) => setError(reason.message));
     return () => { cancelled = true; };
-  }, [auth?.user, jobId, view]);
+  }, [auth?.user, jobId, view, shopOpen]);
   const reloadJob = async () => {
     const id = job?.id || jobId;
     if (!id) return;
@@ -968,12 +1053,20 @@ function Studio() {
     if (location.pathname !== "/login") return <Navigate to="/login" replace />;
     return <Auth auth={auth} onSignedIn={(user) => { setAuth({ user, needsSetup: false }); navigate("/jobs"); }} />;
   }
+  const signOut = async () => {
+    await api("auth/logout", { method: "POST", body: "{}" });
+    setAuth({ user: null, needsSetup: false });
+    navigate("/login");
+  };
   if (auth.user.role === "superadmin") {
-    return <div className="auth-shell" data-testid="platform-screen">
+    return <PlatformScreen onSignedOut={signOut} />;
+  }
+  if (!shopOpen) {
+    return <div className="auth-shell" data-testid="suspended-screen">
       <main className="auth-form">
-        <h2>Platform administrator</h2>
-        <p className="muted">This sign-in is not a shop workspace. Shop jobs, files, and settings stay inside each shop.</p>
-        <button className="primary wide" data-testid="platform-sign-out-button" onClick={async () => { await api("auth/logout", { method: "POST", body: "{}" }); setAuth({ user: null, needsSetup: false }); navigate("/login"); }}>Sign out</button>
+        <h2>This shop is suspended</h2>
+        <p className="muted">Sign-in is blocked until a platform administrator turns the shop back on. Job files stay in the shop.</p>
+        <button className="primary wide" data-testid="suspended-sign-out-button" onClick={signOut}>Sign out</button>
       </main>
     </div>;
   }

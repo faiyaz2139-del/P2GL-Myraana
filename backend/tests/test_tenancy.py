@@ -364,6 +364,12 @@ async def _migration_backfills_print2go_and_can_run_twice():
     assert shops[0]["name"] == "Print2Go London"
     assert shops[0]["slug"] == "print2go"
     assert shops[0]["billing"]["enabled"] is False
+    assert shops[0]["status"] == "active"
+    await raw.shops.update_one({"_id": PRINT2GO_SHOP_ID}, {"$set": {"status": "suspended"}})
+    await migrate_tenants(database)
+    suspended = await raw.shops.find_one({"_id": PRINT2GO_SHOP_ID})
+    assert suspended["status"] == "suspended"
+    assert suspended["name"] == "Print2Go London"
     job = await raw.jobs.find_one({"_id": "j1"})
     assert job["shop_id"] == PRINT2GO_SHOP_ID
     assert job["customer"] == "Ada"

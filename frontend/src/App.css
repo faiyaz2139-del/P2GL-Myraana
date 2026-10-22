@@ -17,3 +17,10 @@ img.brand-mark{width:40px;height:40px;border-radius:11px;background:transparent;
 .mobile-brand .brand-name{font-size:22px}
 .plain-list{list-style:none;padding:0;margin:12px 0 0;display:grid;gap:8px}
 .plain-list li{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.platform-shell{display:block;min-height:100vh;background:var(--bg)}
+.platform-main{width:min(1100px,100%);margin:0 auto;padding:32px 20px 64px}
+.data-table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:12px}
+.data-table th,.data-table td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+.data-table th{font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+.table-wrap{overflow-x:auto;margin:16px 0 28px}
+.row-actions{display:flex;gap:8px}

@@ -40,7 +40,14 @@ from p2g.products import (
     resolve_spec,
 )
 from p2g.public_forms import FormError, lead_from_payload, signup_result
-from p2g.account_access import reset_is_limited, reset_request_message, shop_allows_sign_in
+from p2g.account_access import (
+    SUSPENDED_MESSAGE,
+    public_lead,
+    reset_is_limited,
+    reset_request_message,
+    shop_allows_sign_in,
+    shop_directory_row,
+)
 from p2g.mail import MailError, public_base, send_email
 from p2g.shops import (
     accept_invite,
@@ -48,6 +55,7 @@ from p2g.shops import (
     create_invite,
     issue_password_reset,
     list_invites,
+    open_shop_from_lead,
     provision_shop,
     replace_settings,
     resend_invite,
@@ -276,6 +284,10 @@ async def auth_login(request: Request):
     user = matches[0] if matches else None
     if not user or not password_matches(password, user["password"]):
         raise AppError("Email or password is incorrect.", 401)
+    if user.get("shop_id"):
+        shop = await db.shops.find_one({"_id": user["shop_id"]}, {"status": 1})
+        if not shop or not shop_allows_sign_in(shop.get("status")):
+            raise AppError(SUSPENDED_MESSAGE, 403)
     token, cookie, safe_user = session_response(request, user)
     await create_session(token, user["id"], user.get("shop_id"))
     response = JSONResponse({"user": safe_user})
@@ -403,17 +415,91 @@ async def platform_shops(request: Request):
     user = await current_user(request)
     if not is_superadmin(user):
         raise AppError("Only a platform administrator can do that.", 403)
+    return await _platform_directory()
+
+
+def _require_platform(user):
+    if not is_superadmin(user):
+        raise AppError("Only a platform administrator can do that.", 403)
+    return user
+
+
+async def _platform_directory():
     with unscoped():
-        rows = await db.shops.find({}).to_list(500)
-    return [
-        {
-            "id": row.get("_id"),
-            "name": row.get("name"),
-            "slug": row.get("slug"),
-            "created": row.get("created"),
-        }
-        for row in rows
-    ]
+        rows = await db.shops.find({}).sort("created", -1).to_list(500)
+        listed = []
+        for row in rows:
+            shop_id = row.get("_id")
+            users = await db.users.count_documents({"shop_id": shop_id})
+            jobs = await db.jobs.count_documents({"shop_id": shop_id})
+            latest = await db.jobs.find(
+                {"shop_id": shop_id},
+                {"updated": 1, "customer": 0, "files": 0, "messages": 0, "events": 0, "spec": 0},
+            ).sort("updated", -1).to_list(1)
+            last = latest[0].get("updated") if latest else None
+            listed.append(shop_directory_row(row, users, jobs, last))
+    return listed
+
+
+@api.post("/platform/shops/{shop_id}/suspend")
+async def suspend_shop(shop_id: str, request: Request):
+    assert_origin(request)
+    _require_platform(await current_user(request))
+    return await _set_shop_status(shop_id, "suspended")
+
+
+@api.post("/platform/shops/{shop_id}/approve")
+async def approve_shop(shop_id: str, request: Request):
+    assert_origin(request)
+    _require_platform(await current_user(request))
+    return await _set_shop_status(shop_id, "active")
+
+
+async def _set_shop_status(shop_id, status):
+    with unscoped():
+        result = await db.shops.update_one({"_id": shop_id}, {"$set": {"status": status}})
+    if not getattr(result, "matched_count", 0):
+        raise AppError("That shop was not found.", 404)
+    return {"ok": True, "id": shop_id, "status": status}
+
+
+@api.get("/platform/leads")
+async def platform_leads(request: Request):
+    _require_platform(await current_user(request))
+    with unscoped():
+        rows = await db.leads.find({"converted": {"$ne": True}}).sort("created", -1).to_list(200)
+    return [public_lead(row) for row in rows]
+
+
+@api.post("/platform/leads/{lead_id}/approve")
+async def approve_platform_lead(lead_id: str, request: Request):
+    assert_origin(request)
+    actor = _require_platform(await current_user(request))
+    with unscoped():
+        lead = await db.leads.find_one({"id": lead_id})
+    if not lead:
+        raise AppError("That request was not found.", 404)
+    if lead.get("converted") and lead.get("shop_id"):
+        return {"ok": True, "already": True, "shopId": lead["shop_id"]}
+    shop, invite = await open_shop_from_lead(
+        lead,
+        actor["id"],
+        link_for=lambda token: _invite_link(request, token),
+    )
+    await db.leads.update_one(
+        {"id": lead_id},
+        {"$set": {"converted": True, "shop_id": shop["_id"]}},
+    )
+    body = {
+        "ok": True,
+        "shopId": shop["_id"],
+        "slug": shop["slug"],
+        "emailed": bool(invite.get("emailed")),
+        "provider": invite.get("provider"),
+    }
+    if invite.get("token"):
+        body["token"] = invite["token"]
+    return body
 
 
 async def _store_lead(payload, default_intent):

@@ -11,6 +11,8 @@ from p2g.tenancy import (
     new_shop_records,
     shop_scope,
     shop_slug,
+    starter_recipes,
+    starter_settings,
     unscoped,
 )
 from p2g.workflow import password_hash
@@ -32,14 +34,7 @@ async def provision_shop(name, email, password, owner_name=""):
     with unscoped():
         if await db.users.find_one({"email": email, "role": "superadmin"}):
             raise AppError("That email cannot be used for a shop.", 409)
-        slug = shop_slug(name)
-        candidate = slug
-        for _ in range(6):
-            if not await db.shops.find_one({"slug": candidate}):
-                break
-            candidate = f"{slug[:32].rstrip('-')}-{new_id()[:6]}"
-        else:
-            candidate = f"shop-{new_id()[:8]}"
+        candidate = await _unique_slug(name)
         shop_id = new_id()
         bundle = new_shop_records(
             shop_id=shop_id,
@@ -66,6 +61,63 @@ async def provision_shop(name, email, password, owner_name=""):
             await db.recipes.delete_many({"shop_id": shop_id})
         raise
     return bundle["user"], bundle["shop"]
+
+
+async def _unique_slug(name):
+    slug = shop_slug(name)
+    candidate = slug
+    for _ in range(6):
+        if not await db.shops.find_one({"slug": candidate}):
+            return candidate
+        candidate = f"{slug[:32].rstrip('-')}-{new_id()[:6]}"
+    return f"shop-{new_id()[:8]}"
+
+
+async def open_shop_from_lead(lead, created_by, link_for=None):
+    """A signup lead has no password. The owner joins through an invite."""
+    name = str((lead or {}).get("shop") or "").strip()
+    email = str((lead or {}).get("email") or "").strip().lower()
+    owner_name = str((lead or {}).get("name") or "").strip() or name
+    if len(name) < 2 or len(name) > 120:
+        raise AppError("Enter your shop name.", 400)
+    if "@" not in email or len(email) > 200 or " " in email:
+        raise AppError("Enter a valid email address.", 400)
+    created = now()
+    with unscoped():
+        if await db.users.find_one({"email": email, "role": "superadmin"}):
+            raise AppError("That email cannot be used for a shop.", 409)
+        slug = await _unique_slug(name)
+        shop_id = new_id()
+        shop = {
+            "_id": shop_id,
+            "name": name,
+            "slug": slug,
+            "created": created,
+            "status": "active",
+            "billing": {"enabled": False, "provider": "stripe"},
+        }
+        await db.shops.insert_one(shop)
+    try:
+        with shop_scope(shop_id):
+            settings = starter_settings(name)
+            settings["_id"] = shop_id
+            await db.settings.insert_one(settings)
+            for recipe in starter_recipes():
+                await db.recipes.insert_one({**recipe, "created": created})
+            invite = await create_invite(
+                {"id": created_by},
+                {"email": email, "role": "admin", "name": owner_name[:80]},
+                link_for=link_for,
+                shop_name=name,
+            )
+    except Exception:
+        with unscoped():
+            await db.shops.delete_one({"_id": shop_id})
+            await db.settings.delete_many({"shop_id": shop_id})
+            await db.recipes.delete_many({"shop_id": shop_id})
+            await db.invites.delete_many({"shop_id": shop_id})
+        raise
+    return shop, invite
 
 
 async def replace_settings(data):

@@ -4,11 +4,16 @@ import os
 from p2g.account_access import (
     PUBLIC_RESET_ERROR,
     PUBLIC_RESET_REQUEST,
+    SUSPENDED_MESSAGE,
+    directory_keys,
+    public_lead,
     public_reset_error,
     reset_is_limited,
     reset_request_message,
     reset_token_state,
     shop_allows_sign_in,
+    shop_directory_row,
+    sign_in_denial,
 )
 from p2g.mail import email_provider
 
@@ -70,3 +75,52 @@ def test_shop_sign_in_allows_only_an_active_shop():
     assert shop_allows_sign_in("") is True
     assert shop_allows_sign_in("suspended") is False
     assert shop_allows_sign_in("pending") is False
+    assert sign_in_denial("active", True) is None
+    assert sign_in_denial(None, True) is None
+    assert sign_in_denial("suspended", True) == SUSPENDED_MESSAGE
+    assert sign_in_denial("pending", True) == SUSPENDED_MESSAGE
+    assert sign_in_denial("suspended", False) is None
+
+
+def test_platform_directory_counts_shops_without_job_contents():
+    row = shop_directory_row(
+        {
+            "_id": "shop-north",
+            "name": "North Press",
+            "slug": "north-press",
+            "status": "suspended",
+            "created": "2026-10-01T00:00:00+00:00",
+            "customer": "Ada",
+            "files": ["secret.pdf"],
+            "messages": ["hello"],
+        },
+        3,
+        9,
+        "2026-10-22T00:00:00+00:00",
+    )
+    assert tuple(row) == directory_keys()
+    assert row["users"] == 3
+    assert row["jobs"] == 9
+    assert row["status"] == "suspended"
+    assert row["lastActivity"] == "2026-10-22T00:00:00+00:00"
+    assert "Ada" not in row.values()
+    assert "secret.pdf" not in str(row)
+    missing = shop_directory_row({"_id": "print2go", "name": "Print2Go", "slug": "print2go"}, 1, 0, None)
+    assert missing["status"] == "active"
+
+
+def test_public_lead_omits_a_password():
+    lead = public_lead({
+        "id": "lead-1",
+        "email": "owner@north.test",
+        "shop": "North Press",
+        "name": "Ada",
+        "city": "London",
+        "message": "Ready",
+        "intent": "signup",
+        "created": "2026-10-22T00:00:00+00:00",
+        "password": "not-stored",
+    })
+    assert "password" not in lead
+    assert "not-stored" not in lead.values()
+    assert lead["email"] == "owner@north.test"
