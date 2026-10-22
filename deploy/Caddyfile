@@ -1,0 +1,34 @@
+# Cheap single-VM host for Myraana. Caddy obtains TLS certificates.
+# Point myraana.com at this machine, then:
+#   caddy run --config deploy/Caddyfile
+# Build the frontend first (`npm run build` in frontend/) and run the API with uvicorn.
+#
+# Unknown public paths return 404. The studio routes fall back to the SPA shell.
+
+myraana.com, www.myraana.com {
+	encode gzip
+	root * frontend/build
+
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	@studio path /login /login/* /signup /signup/* /jobs /jobs/* /recipes /recipes/* /settings /settings/*
+	handle @studio {
+		try_files {path} /index.html
+		file_server
+	}
+
+	handle {
+		try_files {path} {path}.html {path}/index.html
+		file_server
+	}
+
+	handle_errors {
+		@missing expression {http.error.status_code} == 404
+		handle @missing {
+			rewrite * /404.html
+			file_server
+		}
+	}
+}

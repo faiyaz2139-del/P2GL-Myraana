@@ -11,10 +11,10 @@ def cases(fields, values):
 
 if __name__ == '__main__':
     import unittest
-    import test_agents, test_costing, test_preflight_cases, test_safety
+    import test_agents, test_catalog_and_products, test_costing, test_preflight_cases, test_safety
     class AgentTests(unittest.TestCase):
         pass
-    for module in (test_agents, test_costing, test_preflight_cases, test_safety):
+    for module in (test_agents, test_catalog_and_products, test_costing, test_preflight_cases, test_safety):
         for name, func in vars(module).items():
             if not name.startswith('test_') or not callable(func): continue
             rows = getattr(func, 'test_cases', None)

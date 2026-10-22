@@ -5,6 +5,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 from p2g.core import AppError, db, new_id, now
+from p2g.printers import filter_printers
 
 
 def _secret():
@@ -34,6 +35,7 @@ def _inventory(value):
         if not isinstance(items, list) or len(items) > 50:
             raise AppError("Connector inventory is invalid.", 400)
         result[key] = [item for item in items if isinstance(item, dict)][:50]
+    result["printers"] = filter_printers(result.get("printers"))
     result["hostname"] = str(value.get("hostname", ""))[:120]
     return result
 

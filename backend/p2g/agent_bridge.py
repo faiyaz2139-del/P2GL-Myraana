@@ -5,6 +5,7 @@ from agents.orchestrator import MultiAgentOrchestrator
 from agents.schemas import JobState
 
 from p2g.core import AppError, db, lock, new_id, now, unlock
+from p2g.review import review_headline
 from p2g.workflow import get_job, latest, record_event, save_job
 
 
@@ -82,9 +83,14 @@ async def build_job_state(job):
     return JobState(
         job_id=job["id"],
         generation=job["generation"],
-        product="business_card",
+        product=job.get("product") or (job.get("recipe") or {}).get("product") or "business-card",
         quantity=job["quantity"],
-        order_spec={"stock": job["stock"], "finish": job["finish"], "sides": job["sides"]},
+        order_spec={
+            "stock": job["stock"],
+            "finish": job["finish"],
+            "sides": job["sides"],
+            "options": (job.get("spec") or {}).get("options") or {},
+        },
         artwork={"original_file_id": original["id"] if original else None},
         preflight={
             "measured": job["tasks"][2]["status"] == "Completed",
@@ -103,7 +109,10 @@ async def build_job_state(job):
             "checksum": print_ready["sha"] if print_ready else None,
             "verified": verified,
         },
-        recipe={"product": "business_card", **job["recipe"]},
+        recipe={
+            "product": job.get("product") or (job.get("recipe") or {}).get("product") or "business-card",
+            **job["recipe"],
+        },
         optimization={"candidate_plans": capabilities},
         production={
             "route": job.get("route"),
@@ -143,7 +152,12 @@ async def evaluate_agents(job_id, actor):
             {"_id": 0},
         )
         if existing:
-            return {"execution": existing["id"], "results": existing["results"], "idempotent": True}
+            return {
+                "execution": existing["id"],
+                "results": existing["results"],
+                "headline": review_headline(existing["results"]),
+                "idempotent": True,
+            }
         results = [item.model_dump(mode="json") for item in MultiAgentOrchestrator().run_until_gate(state)]
         for result in results:
             record_event(job, f"Agent {result['agent']}: {result['summary']}", actor)
@@ -163,6 +177,11 @@ async def evaluate_agents(job_id, actor):
             }
         )
         await save_job(job, token)
-        return {"execution": execution_id, "results": results, "idempotent": False}
+        return {
+            "execution": execution_id,
+            "results": results,
+            "headline": review_headline(results),
+            "idempotent": False,
+        }
     finally:
         await unlock(job_id, token)

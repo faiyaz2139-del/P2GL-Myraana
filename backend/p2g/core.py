@@ -12,10 +12,11 @@ LEASE_MS = 120000
 
 
 class AppError(Exception):
-    def __init__(self, message, status=409):
+    def __init__(self, message, status=409, code=None):
         super().__init__(message)
         self.message = message
         self.status = status
+        self.code = code
 
 
 def now():

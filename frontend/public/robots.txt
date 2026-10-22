@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+Disallow: /jobs
+Disallow: /recipes
+Disallow: /settings
+Disallow: /api
+
+Sitemap: https://myraana.com/sitemap.xml

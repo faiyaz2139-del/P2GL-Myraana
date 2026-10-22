@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, FastAPI, File, Request, Response, UploadFile
+from fastapi import APIRouter, FastAPI, File, Form, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 
@@ -16,6 +16,7 @@ load_dotenv(ROOT_DIR / ".env")
 
 from p2g.ai import configured as ai_configured, conversation_events
 from p2g.agent_bridge import evaluate_agents
+from p2g.billing import billing_status, checkout_available
 from p2g.build_metadata import read_build_metadata
 from p2g.connector_pairing import (
     approve_pairing,
@@ -26,8 +27,20 @@ from p2g.connector_pairing import (
     pairings,
     pairing_status,
 )
+from p2g.catalog_seed import SpecError
 from p2g.costing import CostValidationError, cost_profile
 from p2g.core import AppError, db, new_id, now
+from p2g.present import status_label
+from p2g.printers import filter_printers, is_virtual_printer, printer_status
+from p2g.products import (
+    artwork_rules_from_settings,
+    normalize_artwork_rules,
+    preset_by_id,
+    public_catalog,
+    resolve_spec,
+)
+from p2g.public_forms import FormError, lead_from_payload, signup_result
+from p2g.uploads import classify_upload
 from p2g.pdfcheck import render_page
 from p2g.workflow import (
     DEFAULT_RECIPE,
@@ -56,13 +69,16 @@ from p2g.workflow import (
 )
 
 
-app = FastAPI(title="Print2Go Production Studio")
+app = FastAPI(title="Myraana")
 api = APIRouter(prefix="/api")
 
 
 def error_response(error):
     if isinstance(error, AppError):
-        return JSONResponse({"error": error.message}, status_code=error.status)
+        body = {"error": error.message}
+        if getattr(error, "code", None):
+            body["code"] = error.code
+        return JSONResponse(body, status_code=error.status)
     return JSONResponse({"error": "Unable to complete the request. Retry safely."}, status_code=500)
 
 
@@ -92,16 +108,43 @@ def valid_text(value, label, maximum, minimum=1):
     return value
 
 
+def valid_due(value):
+    value = valid_text(value, "Due date", 10)
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError as error:
+        raise AppError("Due date must be a real date in YYYY-MM-DD format.", 400) from error
+    return value
+
+
+def discovered_printers(settings_data, devices):
+    rows = []
+    verified = settings_data.get("verifiedPrinters") or []
+    for device in devices or []:
+        inventory = device.get("inventory") or {}
+        for printer in filter_printers(inventory.get("printers")):
+            row = printer_status(printer, verified, device.get("status"))
+            row["device"] = inventory.get("hostname") or "Windows connector"
+            rows.append(row)
+    return rows
+
+
 async def shop_settings():
     settings = await db.settings.find_one({"_id": "shop"}, {"_id": 0})
     if settings:
+        settings.setdefault("shopName", "Print2Go")
+        settings.setdefault("verifiedPrinters", [])
+        settings.setdefault("jobDefaults", None)
         return settings
     return {
         "printer": "",
-        "stocks": ["14pt matte", "16pt soft touch"],
+        "stocks": ["14pt matte", "16pt soft touch", "100lb Gloss Text", "28lb Smooth Text"],
         "sides": [1, 2],
         "instructions": "Operator-assisted RIP handoff. No automatic printing.",
         "version": 1,
+        "shopName": "Print2Go",
+        "verifiedPrinters": [],
+        "jobDefaults": None,
     }
 
 
@@ -113,7 +156,7 @@ async def startup():
 
 @api.get("/")
 async def health():
-    return {"name": "Print2Go Production Studio", "status": "ready"}
+    return {"name": "Myraana", "status": "ready", "shop": "Print2Go"}
 
 
 @api.get("/build-info")
@@ -186,6 +229,77 @@ async def auth_logout(request: Request):
     return response
 
 
+@api.get("/products")
+async def products(request: Request):
+    require_user(await current_user(request))
+    catalog = public_catalog()
+    catalog["artworkRules"] = artwork_rules_from_settings(await shop_settings())
+    return catalog
+
+
+@api.post("/public/leads")
+async def create_lead(request: Request):
+    assert_origin(request)
+    return await _store_lead(await request.json(), "early-access")
+
+
+@api.post("/public/signup")
+async def public_signup(request: Request):
+    """Record a shop request. Do not create a user or a second workspace."""
+    assert_origin(request)
+    payload = await request.json()
+    payload.pop("password", None)
+    await _store_lead(payload, "signup")
+    return signup_result()
+
+
+async def _store_lead(payload, default_intent):
+    try:
+        lead = lead_from_payload(payload, payload.get("intent") or default_intent)
+    except FormError as error:
+        raise AppError(error.message, 400) from error
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    if await db.leads.count_documents({"email": lead["email"], "created": {"$gt": cutoff}}) >= 8:
+        raise AppError("Too many requests for this email. Try again tomorrow.", 429)
+    await db.leads.insert_one({**lead, "id": new_id(), "created": now()})
+    return {"ok": True}
+
+
+@api.get("/billing")
+async def billing(request: Request):
+    require_user(await current_user(request))
+    return billing_status()
+
+
+@api.post("/billing/checkout")
+async def billing_checkout(request: Request):
+    assert_origin(request)
+    require_admin(await current_user(request))
+    if not checkout_available():
+        raise AppError("Billing is disabled.", 503)
+    raise AppError("Stripe checkout is not turned on for this shop yet.", 503)
+
+
+@api.post("/billing/webhook")
+async def billing_webhook(request: Request):
+    if not checkout_available():
+        raise AppError("Billing is disabled.", 503)
+    import stripe
+
+    stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
+    try:
+        event = stripe.Webhook.construct_event(
+            await request.body(),
+            request.headers.get("stripe-signature", ""),
+            os.environ["STRIPE_WEBHOOK_SECRET"],
+        )
+    except Exception as error:
+        raise AppError("Billing webhook could not be verified.", 400) from error
+    return {"received": True, "type": event.get("type")}
+
+
 @api.get("/recipes")
 async def recipes(request: Request):
     require_user(await current_user(request))
@@ -198,12 +312,15 @@ async def create_recipe(request: Request):
     require_admin(await current_user(request))
     payload = await request.json()
     name = valid_text(payload.get("name"), "Recipe name", 100)
+    product_id = str(payload.get("product") or payload.get("id") or "business-card")
+    if preset_by_id(product_id) is None or preset_by_id(product_id)["kind"] == "service":
+        raise AppError("Choose a print product for this recipe.", 400)
     fields = {}
     for key, low, high in (
-        ("width", 0.5, 20),
-        ("height", 0.5, 20),
-        ("bleed", 0, 0.5),
-        ("safe", 0.05, 0.5),
+        ("width", 0.4, 150),
+        ("height", 0.4, 150),
+        ("bleed", 0, 1),
+        ("safe", 0, 1),
         ("minDpi", 72, 1200),
     ):
         try:
@@ -214,10 +331,11 @@ async def create_recipe(request: Request):
             raise AppError(f"{key} is outside the supported range.", 400)
     if fields["safe"] * 2 >= min(fields["width"], fields["height"]):
         raise AppError("Safe margin must fit within the finished size.", 400)
-    latest_recipe = await db.recipes.find_one({}, sort=[("version", -1)])
+    latest_recipe = await db.recipes.find_one({"id": product_id}, sort=[("version", -1)])
     recipe = {
-        "id": "business-card",
-        "version": latest_recipe["version"] + 1,
+        "id": product_id,
+        "product": product_id,
+        "version": (latest_recipe["version"] + 1) if latest_recipe else 1,
         "name": name,
         **fields,
         "minDpi": int(fields["minDpi"]),
@@ -233,14 +351,18 @@ async def settings(request: Request):
     require_user(await current_user(request))
     settings_data = await shop_settings()
     agent = await db.connector_state.find_one({"_id": "agent"}, {"_id": 0})
+    devices = await paired_devices()
     return {
         **settings_data,
+        "artworkRules": artwork_rules_from_settings(settings_data),
         "aiConnected": ai_configured(),
         "connectorConfigured": bool(os.environ.get("CONNECTOR_SECRET")),
+        "billing": billing_status(),
         "agent": agent,
         "connected": bool(agent and agent.get("writable")),
         "pairings": await pairings(),
-        "pairedDevices": await paired_devices(),
+        "pairedDevices": devices,
+        "discoveredPrinters": discovered_printers(settings_data, devices),
     }
 
 
@@ -278,16 +400,23 @@ async def update_settings(request: Request):
     require_admin(await current_user(request))
     payload = await request.json()
     current = await shop_settings()
-    stocks = [valid_text(item, "Stock", 100) for item in payload.get("stocks", [])]
-    if len(stocks) > 30:
-        raise AppError("Use at most 30 supported stocks.", 400)
+    stocks = [valid_text(item, "Stock", 140) for item in payload.get("stocks", [])]
+    if len(stocks) > 80:
+        raise AppError("Use at most 80 supported stocks.", 400)
+    printer = str(payload.get("printer") or "").strip()[:120]
+    if printer and is_virtual_printer({"name": printer}):
+        raise AppError("Virtual printers such as Print to PDF cannot be the production route.", 400)
     data = {
-        "printer": str(payload.get("printer") or "").strip()[:120],
+        "printer": printer,
         "stocks": stocks,
         "sides": [side for side in payload.get("sides", [1, 2]) if side in [1, 2]],
         "instructions": str(payload.get("instructions") or "")[:2000],
         "version": current["version"] + 1,
         "updated": now(),
+        "shopName": str(payload.get("shopName") or current.get("shopName") or "Print2Go")[:80],
+        "verifiedPrinters": current.get("verifiedPrinters") or [],
+        "jobDefaults": current.get("jobDefaults"),
+        "artworkRules": current.get("artworkRules"),
     }
     changed = any(
         current.get(key) != data.get(key)
@@ -318,6 +447,83 @@ async def update_settings(request: Request):
             )
             await save_job(job)
     return {"ok": True}
+
+
+@api.post("/artwork-rules")
+async def save_artwork_rules(request: Request):
+    assert_origin(request)
+    require_admin(await current_user(request))
+    try:
+        rules = normalize_artwork_rules(await request.json())
+    except SpecError as error:
+        raise AppError(error.message, 400) from error
+    current = await shop_settings()
+    await db.settings.update_one(
+        {"_id": "shop"},
+        {
+            "$set": {
+                "artworkRules": rules,
+                "shopName": current.get("shopName") or "Print2Go",
+                "printer": current.get("printer") or "",
+                "stocks": current.get("stocks") or [],
+                "sides": current.get("sides") or [1, 2],
+                "instructions": current.get("instructions") or "",
+                "version": current.get("version") or 1,
+                "verifiedPrinters": current.get("verifiedPrinters") or [],
+            }
+        },
+        upsert=True,
+    )
+    return {"ok": True, "artworkRules": rules}
+
+
+@api.post("/printers/verify")
+async def verify_printer(request: Request):
+    assert_origin(request)
+    user = require_admin(await current_user(request))
+    payload = await request.json()
+    name = valid_text(payload.get("name"), "Printer", 120)
+    candidate = {"name": name, "driver": payload.get("driver"), "port": payload.get("port")}
+    if is_virtual_printer(candidate):
+        raise AppError("Virtual printers such as Print to PDF, OneNote and Adobe PDF cannot be verified.", 400)
+    current = await shop_settings()
+    verified = [item for item in (current.get("verifiedPrinters") or []) if item != name]
+    verified.append(name)
+    printer = name if payload.get("use", True) else (current.get("printer") or name)
+    changed = printer != (current.get("printer") or "")
+    version = int(current.get("version") or 1) + (1 if changed else 0)
+    await db.settings.update_one(
+        {"_id": "shop"},
+        {
+            "$set": {
+                "printer": printer,
+                "verifiedPrinters": verified,
+                "stocks": current.get("stocks") or [],
+                "sides": current.get("sides") or [1, 2],
+                "instructions": current.get("instructions") or "",
+                "version": version,
+                "shopName": current.get("shopName") or "Print2Go",
+                "updated": now(),
+                "verifiedBy": user["id"],
+            }
+        },
+        upsert=True,
+    )
+    if changed:
+        affected = await db.jobs.find(
+            {"state": "active", "tasks.12.status": {"$ne": "Completed"}},
+            {"_id": 0},
+        ).to_list(500)
+        for job in affected:
+            if not job.get("route"):
+                continue
+            reset_from(
+                job,
+                8,
+                "Shop settings changed. Choose a route and repeat readiness before authorization.",
+            )
+            await save_job(job)
+    return {"ok": True, "printer": printer, "verifiedPrinters": verified}
 
 
 @api.get("/cost-profiles")
@@ -378,6 +584,7 @@ async def jobs(request: Request):
     for item in found:
         item["messages"] = []
         item["events"] = []
+        item["statusLabel"] = status_label(item)
     return found
 
 
@@ -386,23 +593,34 @@ async def create_job(request: Request):
     assert_origin(request)
     user = require_user(await current_user(request))
     payload = await request.json()
+    if payload.get("confirmed") is not True:
+        raise AppError("Confirm the order details before creating the job.", 400)
     try:
         quantity = int(payload.get("quantity"))
-        sides = int(payload.get("sides"))
     except (TypeError, ValueError) as error:
-        raise AppError("Quantity and sides are required.", 400) from error
-    if not 1 <= quantity <= 1_000_000 or sides not in {1, 2}:
-        raise AppError("Quantity or sides are outside the supported range.", 400)
-    recipe = await db.recipes.find_one({}, {"_id": 0}, sort=[("version", -1)])
+        raise AppError("Quantity is required.", 400) from error
+    if not 1 <= quantity <= 1_000_000:
+        raise AppError("Quantity is outside the supported range.", 400)
+    due = valid_due(payload.get("due"))
+    rules = artwork_rules_from_settings(await shop_settings())
+    preset_id = str(payload.get("product") or payload.get("presetId") or "business-card")
+    recipe_doc = await db.recipes.find_one({"id": preset_id}, {"_id": 0}, sort=[("version", -1)])
+    try:
+        spec, recipe = resolve_spec({**payload, "product": preset_id}, rules, recipe_doc)
+    except SpecError as error:
+        raise AppError(error.message, 400) from error
     job = {
         "id": new_id(),
         "customer": valid_text(payload.get("customer"), "Customer", 180),
+        "product": spec["product"],
+        "spec": spec,
         "quantity": quantity,
-        "sides": sides,
-        "stock": valid_text(payload.get("stock"), "Stock", 100),
-        "finish": valid_text(payload.get("finish"), "Finish", 100),
-        "due": valid_text(payload.get("due"), "Due date", 10),
-        "recipe": recipe or {**DEFAULT_RECIPE, "created": now()},
+        "sides": spec["sides"],
+        "stock": spec["stock"],
+        "finish": spec["finish"],
+        "due": due,
+        "recipe": recipe,
+        "sourceKind": None,
         "tasks": tasks(),
         "files": [],
         "messages": [],
@@ -413,8 +631,31 @@ async def create_job(request: Request):
         "created": now(),
         "updated": now(),
     }
+    update_task(job, 0, "Completed", f"Order details confirmed by {user['name']}.", user["name"])
     record_event(job, "Order created.", user["name"])
     await db.jobs.insert_one({"_id": job["id"], **job})
+    await db.settings.update_one(
+        {"_id": "shop"},
+        {
+            "$set": {
+                "jobDefaults": {
+                    "product": spec["product"],
+                    "sizeId": spec["sizeId"],
+                    "width": spec["width"],
+                    "height": spec["height"],
+                    "unit": spec["unit"],
+                    "bleed": spec["bleed"],
+                    "safe": spec["safe"],
+                    "quantity": quantity,
+                    "sides": spec["sides"],
+                    "stock": spec["stock"],
+                    "finish": spec["finish"],
+                    "options": spec["options"],
+                }
+            }
+        },
+    )
+    job["statusLabel"] = status_label(job)
     return job
 
 
@@ -424,19 +665,34 @@ async def job_detail(job_id: str, request: Request):
     job = await get_job(job_id)
     if not job:
         raise AppError("Job not found.", 404)
+    job["statusLabel"] = status_label(job)
     return job
 
 
 @api.post("/jobs/{job_id}/artwork")
-async def upload_artwork(job_id: str, request: Request, file: UploadFile = File(...)):
+async def upload_artwork(
+    job_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+    acknowledged: str = Form(None),
+):
     assert_origin(request)
     user = require_user(await current_user(request))
     job = await get_job(job_id)
     if not job or job["state"] != "active":
         raise AppError("This job is not available for artwork changes.", 409)
-    content = await file.read(4 * 1024 * 1024 + 1)
-    if len(content) < 5 or len(content) > 4 * 1024 * 1024 or not content.startswith(b"%PDF-"):
-        raise AppError("Upload one PDF of up to 4 MB.", 400)
+    if str(acknowledged).lower() not in {"true", "on", "1"}:
+        raise AppError("Confirm this is the artwork for the job before upload.", 400)
+    rules = artwork_rules_from_settings(await shop_settings())
+    limit = int(rules["maxUploadBytes"])
+    content = await file.read(limit + 1)
+    if len(content) < 8 or len(content) > limit:
+        raise AppError(f"Upload one file up to {max(1, limit // 1_000_000)} MB.", 400)
+    try:
+        kind = classify_upload(file.filename, content, rules["acceptedTypes"])
+    except SpecError as error:
+        raise AppError(error.message, 400) from error
+    job["sourceKind"] = kind
     original = await create_file(job, "ORIGINAL", content, None, "Original upload preserved.", file.filename)
     reset_from(job, 2, "New artwork version: downstream checks and approvals invalidated.")
     job.pop("inspection", None)
@@ -514,6 +770,30 @@ async def job_action(job_id: str, request: Request):
             "original_file_id": latest(job, "ORIGINAL")["id"],
         }
         update_task(job, 3, "Completed", "Blank border outside trim accepted; content is not stretched.", user["name"])
+    elif action == "confirm-bleed":
+        require_completed(job, 3)
+        if job["tasks"][3]["status"] == "Completed":
+            raise AppError("Bleed handling is already confirmed.")
+        if job.get("inspection", {}).get("bleed") == "missing" and not job.get("bleedDecision"):
+            raise AppError("Choose a corrected PDF or explicitly accept a blank border.")
+        if not payload.get("acknowledged"):
+            raise AppError("Confirm bleed handling before preparation.")
+        original = latest(job, "ORIGINAL") or {}
+        job["bleedConfirmation"] = {
+            "actor_id": user["id"],
+            "actor_name": user["name"],
+            "at": now(),
+            "generation": job["generation"],
+            "original_file_id": original.get("id"),
+            "decision": job.get("bleedDecision") or "bleed-present",
+        }
+        update_task(
+            job,
+            3,
+            "Waiting for operator",
+            "Bleed handling confirmed. Continue to prepare the print-ready file.",
+            user["name"],
+        )
     elif action == "approve":
         require_completed(job, 7)
         if not print_ready or payload.get("sha") != print_ready["sha"] or not payload.get("acknowledged"):
@@ -530,11 +810,47 @@ async def job_action(job_id: str, request: Request):
     elif action == "route":
         require_completed(job, 8)
         settings_data = await shop_settings()
-        if not settings_data["printer"] or job["stock"] not in settings_data["stocks"]:
-            raise AppError("No compatible route. Configure the printer and selected stock first.")
-        job["route"] = {"settingsVersion": settings_data["version"], "printer": settings_data["printer"]}
-        update_task(job, 8, "Completed", "Production route selected.", user["name"])
-        update_task(job, 9, "Waiting for operator", "Stage in RIP without printing.", user["name"])
+        mode = payload.get("mode") or "production"
+        if mode not in {"production", "proof-only"}:
+            raise AppError("Choose a production route or a proof-only route.", 400)
+        if mode == "proof-only":
+            job["route"] = {
+                "mode": "proof-only",
+                "settingsVersion": settings_data.get("version"),
+                "printer": None,
+            }
+            update_task(
+                job,
+                8,
+                "Completed",
+                "Proof-only route selected. No press is assigned and nothing will print.",
+                user["name"],
+            )
+            update_task(
+                job,
+                9,
+                "Waiting for operator",
+                "Proof-only jobs stop before the press. Choose a production route to continue.",
+                user["name"],
+            )
+        else:
+            printer = str(settings_data.get("printer") or "").strip()
+            verified = settings_data.get("verifiedPrinters") or []
+            stock_ok = job["stock"] in (settings_data.get("stocks") or [])
+            printer_ok = bool(printer) and (not verified or printer in verified)
+            if not printer_ok or not stock_ok:
+                raise AppError(
+                    "No verified production route for this stock. Verify a machine in Shop settings, or use a proof-only route.",
+                    409,
+                    code="machine-required",
+                )
+            job["route"] = {
+                "mode": "production",
+                "settingsVersion": settings_data["version"],
+                "printer": printer,
+            }
+            update_task(job, 8, "Completed", f"Production route selected: {printer}.", user["name"])
+            update_task(job, 9, "Waiting for operator", "Stage in RIP without printing.", user["name"])
     elif action == "handoff":
         require_completed(job, 9)
         note = valid_text(payload.get("note"), "RIP handoff note", 1000, 5)
@@ -617,6 +933,7 @@ async def job_action(job_id: str, request: Request):
     else:
         raise AppError("This protected action is not available in the current workflow.")
     await save_job(job)
+    job["statusLabel"] = status_label(job)
     return job
 
 

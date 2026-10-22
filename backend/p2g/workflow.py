@@ -8,6 +8,8 @@ from motor.motor_asyncio import AsyncIOMotorGridFSBucket
 
 from p2g.core import AppError, db, lock, new_id, now, unlock, sha256
 from p2g.pdfcheck import PdfError, inspect, make_print_ready, prepare, render_page, verify
+from p2g.present import status_label
+from p2g.uploads import SpecError, prepare_artwork
 
 
 TASK_TITLES = [
@@ -36,7 +38,7 @@ DEFAULT_RECIPE = {
     "width": 3.5,
     "height": 2.0,
     "bleed": 0.125,
-    "safe": 0.125,
+    "safe": 0.25,
     "minDpi": 300,
     "cutInstructions": "Cut to 3.5 × 2 inches using the verified trim box.",
 }
@@ -143,6 +145,8 @@ def public(doc):
     if not doc:
         return None
     copy = {key: value for key, value in doc.items() if key != "_id"}
+    if "tasks" in copy and "state" in copy:
+        copy["statusLabel"] = status_label(copy)
     return copy
 
 
@@ -154,6 +158,8 @@ async def ensure_collections():
     await db.executions.create_index([("job_id", 1), ("status", 1)])
     await db.executions.create_index("lease_until")
     await db.cost_profiles.create_index("id", unique=True)
+    await db.leads.create_index("email")
+    await db.leads.create_index("created")
     await db.bootstrap.update_one(
         {"_id": "first-run"},
         {"$setOnInsert": {"configured": False, "created": now()}},
@@ -162,6 +168,22 @@ async def ensure_collections():
     if not await db.recipes.find_one({"id": "business-card", "version": 1}):
         recipe = {**DEFAULT_RECIPE, "created": now()}
         await db.recipes.insert_one(recipe)
+    if not await db.recipes.find_one({"id": "flyer"}):
+        await db.recipes.insert_one(
+            {
+                "id": "flyer",
+                "product": "flyer",
+                "version": 1,
+                "name": "Flyer",
+                "width": 8.5,
+                "height": 11.0,
+                "bleed": 0.125,
+                "safe": 0.25,
+                "minDpi": 300,
+                "cutInstructions": "Cut to 8.5 × 11 in using the verified trim box. No fold.",
+                "created": now(),
+            }
+        )
 
 
 def password_hash(password):
@@ -285,6 +307,16 @@ async def run_pdf_workflow(job, actor, execution=None, token=None):
         raise AppError("Upload artwork first.")
     content = await file_bytes(job, original)
     try:
+        try:
+            content = prepare_artwork(
+                content,
+                job.get("sourceKind") or "pdf",
+                (job.get("recipe") or {}).get("outputDpi") or 300,
+            )
+        except SpecError as error:
+            update_task(job, 2, "Blocked", str(error), actor, original["id"])
+            await persist()
+            return job
         if job["tasks"][2]["status"] != "Completed":
             update_task(job, 2, "Running", "Checking artwork against the pinned recipe.", actor, execution=execution)
             await persist()
@@ -316,7 +348,18 @@ async def run_pdf_workflow(job, actor, execution=None, token=None):
                 )
                 await persist()
                 return job
-            update_task(job, 3, "Completed", "Bleed decision recorded.", actor, original["id"])
+            if not job.get("bleedConfirmation"):
+                update_task(
+                    job,
+                    3,
+                    "Waiting for operator",
+                    "Confirm bleed handling before the print-ready file is prepared.",
+                    actor,
+                    original["id"],
+                )
+                await persist()
+                return job
+            update_task(job, 3, "Completed", "Bleed handling confirmed.", actor, original["id"])
         if job["tasks"][4]["status"] != "Completed":
             update_task(job, 4, "Running", "Preparing the protected working copy.", actor, execution=execution)
             await persist()

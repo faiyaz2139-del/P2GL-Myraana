@@ -69,10 +69,11 @@ def inspect(data, r, sides):
     reader, doc = _open(data)
     errors, warnings, pages = [], [], []
     n = len(reader.pages)
+    max_pages = int(r.get("maxPages") or 2)
     if n != sides:
         errors.append(f"Expected {sides} page(s), found {n}. Upload one PDF with the front, then the back.")
-    if n > 2:
-        errors.append("Business cards support at most two PDF pages.")
+    if n > max_pages:
+        errors.append(f"This job supports at most {max_pages} PDF page(s).")
     try:
         if reader.get_fields():
             errors.append("Interactive form fields must be flattened by the artwork designer before upload.")
@@ -87,7 +88,9 @@ def inspect(data, r, sides):
         w, h = float(mb.width), float(mb.height)
         full, trim = close(w, fw) and close(h, fh), close(w, tw) and close(h, th)
         if not full and not trim:
-            errors.append(f"Page {i+1}: {w/PT:.3f} × {h/PT:.3f} inches does not match the recipe. No stretching is allowed.")
+            errors.append(
+                f"Page {i+1}: {w/PT:.3f} × {h/PT:.3f} inches does not match the finished size. No stretching is allowed."
+            )
             bleed = "unsuitable"
         elif trim and bleed != "unsuitable":
             bleed = "missing"
@@ -135,7 +138,7 @@ def inspect(data, r, sides):
                 dpi = min(info["width"] / pw, info["height"] / ph)
                 cs = {1: "Gray", 3: "RGB", 4: "CMYK"}.get(info.get("colorspace"), str(info.get("colorspace")))
                 images.append({"pixels": [info["width"], info["height"]], "placedInches": [round(pw, 3), round(ph, 3)], "dpi": round(dpi, 1), "colourSpace": cs})
-                if dpi < r["minDpi"]:
+                if dpi < float(r["minDpi"]) - 0.5:
                     errors.append(
                         f"Page {i+1}: an image measures {dpi:.0f} dpi at its placed size; "
                         f"minimum is {r['minDpi']} dpi. Replace it with higher-resolution artwork."
@@ -152,13 +155,21 @@ def inspect(data, r, sides):
     warnings.append(LIMITS)
     if bleed == "correct":
         warnings.append("Page size includes bleed. This cannot prove the design extends to every bleed edge; confirm visually.")
+    colour = _colour_check(pages, r, errors, warnings)
+    raster = r.get("rasterTextDpi")
+    if raster and float(raster) > float(r["minDpi"]):
+        warnings.append(
+            f"Shop rule: rasterized text and logos should be {int(float(raster))} dpi. "
+            f"Placed images are blocked below {int(r['minDpi'])} dpi. "
+            "Photos and logos are not distinguished automatically."
+        )
     errors = list(dict.fromkeys(errors))
     warnings = list(dict.fromkeys(warnings))
     actions = []
     for error in errors:
         if "page(s)" in error:
             actions.append("Export the front and back as one PDF with the required page count.")
-        elif "does not match the recipe" in error:
+        elif "does not match the finished size" in error or "does not match the recipe" in error:
             actions.append("Export at the exact finished size plus bleed; do not scale artwork in Myraana.")
         elif "safe margin" in error:
             actions.append("Move essential text and logos inward, then upload a revised PDF.")
@@ -168,8 +179,48 @@ def inspect(data, r, sides):
             actions.append("Flatten comments, links, and annotations before export.")
         elif "dpi at its placed size" in error:
             actions.append("Replace low-resolution images with artwork meeting the recipe minimum DPI at final print size.")
+        elif "DeviceRGB" in error:
+            actions.append("Export CMYK artwork, or change the shop RGB policy if RGB files should be accepted.")
+    size_fail = any("does not match" in item for item in errors)
+    dpi_fail = any("dpi at its placed size" in item for item in errors)
+    artwork_checks = [
+        {"name": "size", "status": "fail" if size_fail else "pass"},
+        {"name": "bleed", "status": {"correct": "pass", "missing": "warn", "unsuitable": "fail"}.get(bleed, "warn")},
+        {"name": "dpi", "status": "fail" if dpi_fail else "pass"},
+        {"name": "colour", "status": colour["status"]},
+    ]
     return {"pages": pages, "errors": errors, "warnings": warnings, "actions": list(dict.fromkeys(actions)), "bleed": bleed,
+            "colourMode": colour, "artworkChecks": artwork_checks,
             "engine": "PyMuPDF (MuPDF) text/image tracing + pypdf structure inspection", "at": datetime.now(timezone.utc).isoformat()}
+
+
+def _colour_check(pages, recipe, errors, warnings):
+    found = sorted({
+        colour
+        for page in pages
+        for colour in page.get("colourOperators") or []
+        if colour != "unreadable content stream"
+    })
+    expected = str(recipe.get("colourMode") or "CMYK").upper()
+    policy = recipe.get("rgbPolicy") or "warn"
+    status = "pass"
+    if not found:
+        status = "unknown"
+        warnings.append("No colour operators were found. Colour mode was not certified.")
+    elif expected == "CMYK" and "DeviceRGB" in found:
+        message = (
+            "Colour operators include DeviceRGB. This shop expects CMYK. "
+            "RGB uploads are not converted to CMYK here."
+        )
+        if policy == "reject":
+            errors.append(message)
+            status = "fail"
+        else:
+            warnings.append(message + " The file is accepted with a warning.")
+            status = "warn"
+    if recipe.get("allowSpotColours", True) and any("Separation" in item or "DeviceN" in item for item in found):
+        warnings.append("Spot or DeviceN colour was found. Confirm Pantone separations. No colour conversion is applied.")
+    return {"expected": expected, "found": found, "status": status, "rgbPolicy": policy}
 
 
 def prepare(data, r, blank_border):
@@ -197,8 +248,10 @@ def make_print_ready(data, r, job_id, generation):
     writer = PdfWriter(clone_from=reader)
     writer.add_metadata({
         "/Title": f"PRINT_READY {job_id} g{generation}",
-        "/Producer": "Print2Go Production Studio",
+        "/Producer": "Myraana",
         "/Print2GoRecipe": f"{r['id']} v{r['version']}",
+        "/MyraanaProduct": f"{r.get('product') or r['id']} v{r['version']}",
+        "/MyraanaOutputDpi": str(int(r.get("outputDpi") or 300)),
     })
     writer._info.get_object()[NameObject("/Print2GoStage")] = TextStringObject("PRINT_READY")
     out = io.BytesIO()
