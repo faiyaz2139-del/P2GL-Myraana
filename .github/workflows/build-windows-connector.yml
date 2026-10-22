@@ -103,6 +103,7 @@ jobs:
           $notes = Join-Path $env:RUNNER_TEMP "connector-release-notes.md"
           @"
           Unsigned Windows connector with a simple setup window. Extract the ZIP and open MyraanaConnector.exe.
+          Closing the window leaves it running in the system tray. It can start with Windows after pairing. Opening it again reconnects with no code.
           This connector finds your printers and can place approved PRINT_READY files on your Fiery HOLD queue. It never prints or releases jobs.
           Source commit: $env:GITHUB_SHA
           ZIP SHA-256: $hash

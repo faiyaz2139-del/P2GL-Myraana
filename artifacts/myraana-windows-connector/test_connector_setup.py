@@ -295,6 +295,139 @@ class ConnectorSetupTests(unittest.TestCase):
         self.assertIn("on your Fiery HOLD queue. It never prints or releases jobs.", source)
         self.assertIn("https://myraana.com", source)
         self.assertIn("exercise_bundled_modules()", source)
+        self.assertIn("exercise_tray_support()", source)
+        self.assertIn("pystray._win32", text)
+        self.assertEqual(connector.TRAY_MENU, ("Open", "Scan again", "Start with Windows", "Quit"))
+        self.assertIn("handle_window_close", source)
+        self.assertIn("should_reconnect", source)
+
+    def test_closing_the_window_keeps_the_heartbeat(self):
+        class Root:
+            def __init__(self):
+                self.hidden = False
+                self.destroyed = False
+            def withdraw(self):
+                self.hidden = True
+            def destroy(self):
+                self.destroyed = True
+
+        root = Root()
+        stop = threading.Event()
+        self.assertEqual(connector.handle_window_close(root, stop), "hide")
+        self.assertTrue(root.hidden)
+        self.assertFalse(root.destroyed)
+        self.assertFalse(stop.is_set())
+        connector.quit_connector(root, stop, icon=None)
+        self.assertTrue(stop.is_set())
+        self.assertTrue(root.destroyed)
+
+        root = Root()
+        stop = threading.Event()
+        self.assertEqual(connector.handle_window_close(root, stop, self_test=True), "quit")
+        self.assertTrue(stop.is_set())
+        self.assertTrue(root.destroyed)
+        self.assertFalse(root.hidden)
+
+    def test_start_with_windows_uses_the_current_user_run_key(self):
+        class MemoryRegistry:
+            HKEY_CURRENT_USER = "HKCU"
+            REG_SZ = 1
+            def __init__(self):
+                self.values = {}
+                self.path = None
+            def CreateKey(self, root, path):
+                self.path = path
+                return self
+            def OpenKey(self, root, path):
+                self.path = path
+                return self
+            def SetValueEx(self, key, name, reserved, typ, value):
+                self.values[name] = value
+            def QueryValueEx(self, key, name):
+                if name not in self.values:
+                    raise OSError(name)
+                return self.values[name], self.REG_SZ
+            def DeleteValue(self, key, name):
+                try:
+                    del self.values[name]
+                except KeyError as error:
+                    raise OSError(name) from error
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+
+        registry = MemoryRegistry()
+        self.assertTrue(connector.set_startup(True, registry=registry))
+        self.assertEqual(registry.path, connector.RUN_KEY)
+        self.assertIn("MyraanaConnector", registry.values)
+        self.assertTrue(connector.startup_enabled(registry=registry))
+        self.assertTrue(connector.set_startup(False, registry=registry))
+        self.assertFalse(connector.startup_enabled(registry=registry))
+        state = {"websiteUrl": "https://myraana.com"}
+        with patch.object(connector, "save_state"):
+            self.assertTrue(connector.ensure_default_startup(state, registry=registry))
+        self.assertIs(state["startWithWindows"], True)
+        self.assertIn("MyraanaConnector", registry.values)
+        state["startWithWindows"] = False
+        registry.values.clear()
+        with patch.object(connector, "save_state"):
+            self.assertFalse(connector.ensure_default_startup(state, registry=registry))
+        self.assertNotIn("MyraanaConnector", registry.values)
+
+    def test_launch_reconnects_when_already_paired(self):
+        self.assertTrue(connector.should_reconnect({"websiteUrl": "https://myraana.com"}, "token", ""))
+        self.assertFalse(connector.should_reconnect({"websiteUrl": "https://myraana.com"}, "token", "ABCDEFGH"))
+        self.assertFalse(connector.should_reconnect({"websiteUrl": "https://myraana.com"}, None, ""))
+        self.assertFalse(connector.should_reconnect({}, "token", ""))
+
+    def test_scan_again_marks_the_next_heartbeat(self):
+        stop = threading.Event()
+        scan = threading.Event()
+        scan.set()
+        calls = []
+
+        def request(url, path, payload, credential=None):
+            calls.append(payload)
+            stop.set()
+            return {"ok": True, "scan": False}
+
+        with patch.object(connector, "load_state", return_value={"websiteUrl": "https://myraana.com"}), \
+             patch.object(connector, "save_state"), \
+             patch.object(connector, "secret", side_effect=lambda name, value=None: "token" if name == "credential" else "claim"), \
+             patch.object(connector, "inventory", return_value={"printers": [{"name": "Press"}]}), \
+             patch.object(connector, "request", side_effect=request), \
+             patch.object(connector, "ensure_default_startup", return_value=True), \
+             patch.object(stop, "wait", return_value=False):
+            connector.run("https://myraana.com", report=lambda message: None, stop=stop, scan_now=scan)
+        self.assertIs(calls[0]["scanned"], True)
+
+    def test_tray_menu_offers_open_scan_startup_and_quit(self):
+        class Item:
+            def __init__(self, text, action, default=False, checked=None):
+                self.text = text
+                self.default = default
+                self.checked = checked
+
+        class Menu:
+            def __init__(self, *items):
+                self.items = items
+
+        class FakePystray:
+            pass
+        FakePystray.MenuItem = Item
+        FakePystray.Menu = Menu
+
+        menu = connector.build_tray_menu(FakePystray, {
+            "open": lambda *args: None,
+            "scan": lambda *args: None,
+            "toggle_startup": lambda *args: None,
+            "quit": lambda *args: None,
+            "startup_checked": lambda: True,
+        })
+        self.assertEqual([item.text for item in menu.items], ["Open", "Scan again", "Start with Windows", "Quit"])
+        self.assertTrue(menu.items[0].default)
+        self.assertTrue(menu.items[2].checked(None))
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,8 +7,11 @@ from p2g.account_access import exclude_archived
 from p2g.card_flow import AUTO_ACTOR, hold_failure_message, record_successful_hold
 from p2g.connector_auth import (
     build_pairing_document,
+    connector_presence,
     credential_hash,
     legacy_credential_hash,
+    list_open_pairings,
+    manual_approval_required,
     shop_for_connected_pairing,
 )
 from p2g.core import AppError, db, new_id, now
@@ -115,13 +118,14 @@ async def approve_pairing(pairing_id, user):
 
 
 async def pairings():
-    records = await db.connector_pairings.find(
-        {},
-        {"code_hash": 0, "claim_hash": 0},
-    ).to_list(20)
-    for record in records:
-        record["id"] = record.pop("_id")
-    return records
+    """Live Searching and Found codes only. Expired rows are marked Expired first."""
+    rows = await list_open_pairings(db.connector_pairings, now())
+    known = [device.get("id") for device in await devices()]
+    for row in rows:
+        row["manualApproval"] = manual_approval_required(
+            row.get("created_at"), row.get("device_id"), known
+        )
+    return rows
 
 
 async def devices():
@@ -132,12 +136,7 @@ async def devices():
     current = datetime.now(timezone.utc)
     for record in records:
         record["id"] = record.pop("_id")
-        last_seen = record.get("lastSeen")
-        try:
-            fresh = current - datetime.fromisoformat(last_seen) <= timedelta(seconds=90)
-        except (TypeError, ValueError):
-            fresh = False
-        record["status"] = "Connected" if record.get("enabled") and fresh else "Offline"
+        record["status"] = connector_presence(record.get("lastSeen"), record.get("enabled"), current)
     return records
 
 

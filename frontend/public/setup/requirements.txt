@@ -1,3 +1,6 @@
 keyring==25.5.0
+pillow==11.3.0
 pyinstaller==6.11.1
+pystray==0.19.5
 pywin32==308
+six==1.17.0

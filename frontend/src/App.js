@@ -970,28 +970,47 @@ function Recipes({ recipes, catalog, reload, user }) {
   </main>;
 }
 
-function ConnectorPairing({ settings, reload }) {
-  const [pairing, setPairing] = useState(null);
-  const [message, setMessage] = useState("");
-  const start = async () => {
-    try {
-      const result = await api("connector-pairings", { method: "POST", body: "{}" });
-      setPairing(result);
-      setMessage("Enter this one-time code in the installed Windows Connector.");
-      await reload();
-    } catch (reason) {
-      setMessage(reason.message);
-    }
-  };
-  const approve = async (id) => {
-    try {
-      await api(`connector-pairings/${id}/approve`, { method: "POST", body: "{}" });
-      setMessage("Approved. The connector will reconnect automatically.");
-      await reload();
-    } catch (reason) {
-      setMessage(reason.message);
-    }
-  };
+const PAIRING_POLL_MS = 3000;
+const OPEN_PAIRING_KEY = "myraanaOpenPairing";
+
+function readOpenPairing() {
+  try {
+    const raw = sessionStorage.getItem(OPEN_PAIRING_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return parsed && parsed.id ? parsed : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function writeOpenPairing(value) {
+  try {
+    if (!value) sessionStorage.removeItem(OPEN_PAIRING_KEY);
+    else sessionStorage.setItem(OPEN_PAIRING_KEY, JSON.stringify({ id: value.id, code: value.code || "" }));
+  } catch (error) {
+    /* A private window can block storage. This tab still holds the code. */
+  }
+}
+
+function pairingStillValid(item, now = Date.now()) {
+  if (!item || !item.id) return false;
+  if (item.status !== "Searching" && item.status !== "Found") return false;
+  const expires = Date.parse(item.expires_at || "");
+  return !Number.isFinite(expires) || expires > now;
+}
+
+function newestFoundPairing(pairings, now = Date.now()) {
+  const found = (pairings || []).filter((item) => item.status === "Found" && pairingStillValid(item, now));
+  found.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+  return found[0] || null;
+}
+
+function connectorTrayHint(device) {
+  const host = device?.inventory?.hostname || "this computer";
+  return `Open MyraanaConnector on ${host}. It runs in the tray.`;
+}
+
+function ConnectorPairing({ settings, openPairing, onStart }) {
   return <section className="settings-card" data-testid="connector-pairing-panel">
     <div className="section-heading"><h3>Connect Windows Connector</h3><Link2 /></div>
     <p data-testid="connector-pairing-scope">This code pairs a connector for this shop only. It finds your printers and can place approved PRINT_READY files on your Fiery HOLD queue. It never prints or releases jobs.</p>
@@ -1003,19 +1022,14 @@ function ConnectorPairing({ settings, reload }) {
         <Download size={16} />Mac or Linux script
       </a>
     </div>
-    <ol className="muted"><li>On Windows, download and extract the ZIP, then open MyraanaConnector.exe. On a Mac or Linux computer that can see the press, download the script and run it with Python 3.</li><li>Click Pair connector here. Enter this website and the code in the connector window: <strong>{window.location.origin}</strong></li><li>Click Connect, then Approve below. The connector finds printers by itself. You do not type a printer name.</li></ol>
-    <p className="muted">Windows 10/11 only · No Python or PowerShell setup required.</p>
-    <button className="primary" onClick={start} data-testid="start-connector-pairing-button">
+    <ol className="muted"><li>On Windows, download and extract the ZIP, then open MyraanaConnector.exe. Closing that window leaves it running in the system tray. On a Mac or Linux computer that can see the press, download the script and run it with Python 3.</li><li>Click Pair connector here. Enter this website and the code in the connector window: <strong>{window.location.origin}</strong></li><li>Click Connect. A code created on this page a moment ago is approved for you. An older code, or a different computer, needs Approve next to that computer. The connector finds printers by itself.</li></ol>
+    <p className="muted">Windows 10/11 only · No Python or PowerShell setup required. After pairing, opening the connector again reconnects with no code.</p>
+    <button type="button" className="primary" onClick={onStart} data-testid="start-connector-pairing-button">
       Pair connector
     </button>
-    {pairing && <p className="notice" data-testid="connector-pairing-code">
-      One-time code: <strong>{pairing.code}</strong>
+    {openPairing?.code && <p className="notice" data-testid="connector-pairing-code">
+      One-time code: <strong>{openPairing.code}</strong>
     </p>}
-    {message && <p className="notice" data-testid="connector-pairing-message">{message}</p>}
-    {(settings.pairings || []).filter((item) => item.status === "Found").map((item) => <div className="version-row" key={item.id} data-testid={`pending-connector-${item.id}`}>
-      <span>{item.inventory?.hostname || "Windows connector"} · Found</span>
-      <button className="button" onClick={() => approve(item.id)} data-testid={`approve-connector-${item.id}`}>Approve</button>
-    </div>)}
     {(settings.pairedDevices || []).map((item) => <div className="version-row" key={item.id} data-testid={`paired-connector-${item.id}`}>
       <span>{item.inventory?.hostname || "Windows connector"} · {item.status}</span>
       <span>{item.inventory?.printers?.length || 0} discovered printer(s)</span>
@@ -1178,10 +1192,75 @@ function DiscoveredPrinters({ settings, user, reload }) {
 
 function Settings({ settings, user, reload }) {
   const [message, setMessage] = useState("");
+  const [pairingMessage, setPairingMessage] = useState("");
+  const [approveError, setApproveError] = useState("");
+  const [openPairing, setOpenPairing] = useState(readOpenPairing);
   const [build, setBuild] = useState(null);
   const [printer, setPrinter] = useState(settings?.printer || "");
+  const approving = useRef("");
+  const reloadRef = useRef(reload);
+  const approveRef = useRef(null);
+  reloadRef.current = reload;
   const online = connectorOnline(settings);
+  const offlineDevices = (settings.pairedDevices || []).filter((item) => item.status === "Offline");
+  const pendingClaims = (settings.pairings || [])
+    .filter((item) => item.status === "Found" && pairingStillValid(item))
+    .slice()
+    .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+  const newestClaim = newestFoundPairing(settings.pairings);
+  const codeOpen = Boolean(openPairing?.id) || (settings.pairings || []).some((item) => pairingStillValid(item));
   useEffect(() => { api("build-info").then(setBuild).catch(() => setBuild(null)); }, []);
+  useEffect(() => {
+    if (!codeOpen) return undefined;
+    const timer = setInterval(() => { reloadRef.current(); }, PAIRING_POLL_MS);
+    return () => clearInterval(timer);
+  }, [codeOpen]);
+  const approve = async (id) => {
+    setApproveError("");
+    const target = id || newestClaim?.id;
+    if (!target) {
+      setApproveError("No pending connector was found.");
+      return;
+    }
+    try {
+      await api(`connector-pairings/${target}/approve`, { method: "POST", body: "{}" });
+      const claim = (settings.pairings || []).find((item) => item.id === target) || newestClaim;
+      const host = claim?.inventory?.hostname || "the shop computer";
+      setPairingMessage(`Connected to ${host}`);
+      if (openPairing?.id === target) {
+        writeOpenPairing(null);
+        setOpenPairing(null);
+      }
+      await reload();
+    } catch (reason) {
+      const text = reason?.message || "No pending connector was found.";
+      setApproveError(text);
+      setPairingMessage(text);
+    }
+  };
+  const startPairing = async () => {
+    setApproveError("");
+    approving.current = "";
+    try {
+      const result = await api("connector-pairings", { method: "POST", body: "{}" });
+      const next = { id: result.id, code: result.code };
+      writeOpenPairing(next);
+      setOpenPairing(next);
+      setPairingMessage("Enter this one-time code in the installed Windows Connector.");
+      await reload();
+    } catch (reason) {
+      setPairingMessage(reason?.message || "The pairing code could not be created.");
+    }
+  };
+  approveRef.current = approve;
+  useEffect(() => {
+    if (user.role !== "admin" || !openPairing?.id) return undefined;
+    const claim = (settings.pairings || []).find((item) => item.id === openPairing.id && item.status === "Found" && pairingStillValid(item));
+    if (!claim || claim.manualApproval !== false || approving.current === claim.id) return undefined;
+    approving.current = claim.id;
+    approveRef.current(claim.id);
+    return undefined;
+  }, [settings.pairings, openPairing, user.role]);
   const save = async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -1212,6 +1291,16 @@ function Settings({ settings, user, reload }) {
       </div>
       <Badge status={online ? "Connected" : "Offline"} />
     </div>
+    {offlineDevices.map((item) => <p className="notice warning" key={item.id} data-testid={`connector-offline-hint-${item.id}`}>{connectorTrayHint(item)}</p>)}
+    {user.role === "admin" && approveError && <p className="notice warning" data-testid="connector-approve-error">{approveError}</p>}
+    {user.role === "admin" && pairingMessage && <p className="notice" data-testid="connector-pairing-message">{pairingMessage}</p>}
+    {user.role === "admin" && pendingClaims.map((item) => <div className="notice pending-claim" key={item.id} data-testid={`pending-connector-${item.id}`}>
+      <div>
+        <strong>{item.inventory?.hostname || "Windows connector"}</strong>
+        <p>This computer claimed the pairing code and is waiting.</p>
+      </div>
+      <button type="button" className="primary approve-claim" onClick={() => approve(item.id)} data-testid={`approve-connector-${item.id}`}>Approve</button>
+    </div>)}
     <div className="settings-layout"><div>
       <section className="settings-card">
         <div className="section-heading"><h3>Production route</h3><Printer /></div>
@@ -1231,12 +1320,12 @@ function Settings({ settings, user, reload }) {
       <DiscoveredPrinters settings={settings} user={user} reload={reload} />
       <section className="settings-card">
         <div className="section-heading"><h3>Connect shop</h3><Link2 /></div>
-        <p data-testid="connector-status">{online ? "The shop connector is connected. It reports printers on this network, and Scan again asks it to look now." : "The shop connector is not connected. Download it below, click Pair connector, enter this website and the one-time code, click Connect, then Approve. Until then a proof-only route is available, and an admin can type a press name as a last resort."}</p>
+        <p data-testid="connector-status">{online ? "The shop connector is connected. It reports printers on this network, and Scan again asks it to look now." : offlineDevices.length ? offlineDevices.map(connectorTrayHint).join(" ") : "The shop connector is not connected. Download it below, click Pair connector, enter this website and the one-time code, then click Connect. A code you just created is approved while this page stays open. Until then a proof-only route is available, and an admin can type a press name as a last resort."}</p>
         <p data-testid="connector-shop-note">Each shop pairs its own Windows Connector from this page. The pairing code belongs to this shop only.</p>
         {settings.legacyConnector && <a className="button" href="/setup/print2go-connector.py" download data-testid="download-connector-link"><Download size={16} />Download Print2Go legacy connector</a>}
         <details className="technical"><summary data-testid="connector-setup-summary">Connection setup</summary><ol><li>Pair this shop’s Windows Connector with the one-time code below. No shared secret is required.</li><li>The original Print2Go installation can keep using its server connector secret. That secret does not open another shop.</li><li>The connector stages authorized PDFs only. It never prints.</li></ol></details>
       </section>
-      {user.role === "admin" && <ConnectorPairing settings={settings} reload={reload} />}
+      {user.role === "admin" && <ConnectorPairing settings={settings} openPairing={openPairing} onStart={startPairing} />}
       {user.role === "admin" && <CostProfiles />}
       {user.role === "admin" && <Operators user={user} />}
     </div>
