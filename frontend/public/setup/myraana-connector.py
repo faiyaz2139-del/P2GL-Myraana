@@ -6,15 +6,16 @@ changes printer settings, or writes to hot folders. Build on Windows with the
 adjacent PowerShell script.
 """
 import argparse
+import importlib.util
 import json
 import queue
+import sys
 import threading
 import urllib.parse
 import os
 import platform
 import secrets
 import socket
-import time
 import urllib.error
 import urllib.request
 import uuid
@@ -52,7 +53,37 @@ def secret(name, value=None):
     return keyring.get_password(SERVICE, name)
 
 
+_DISCOVERY = None
+
+
+def load_discovery():
+    """The discovery module ships beside this script and in the repo backend."""
+    global _DISCOVERY
+    if _DISCOVERY is not None:
+        return _DISCOVERY
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "printer_discovery.py"),
+        os.path.normpath(os.path.join(here, "..", "..", "..", "backend", "p2g", "printer_discovery.py")),
+        os.path.normpath(os.path.join(here, "..", "..", "backend", "p2g", "printer_discovery.py")),
+    ]
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            candidates.insert(0, os.path.join(meipass, "printer_discovery.py"))
+        candidates.insert(0, os.path.join(os.path.dirname(sys.executable), "printer_discovery.py"))
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            spec = importlib.util.spec_from_file_location("myraana_printer_discovery", candidate)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _DISCOVERY = module
+            return module
+    raise RuntimeError("Printer discovery is unavailable.")
+
+
 def printers():
+    """Windows spooler queues. Get-Printer and Bonjour run in discover_printers."""
     if platform.system() != "Windows":
         return []
     try:
@@ -75,9 +106,34 @@ def printers():
     return found
 
 
+def discover_printers():
+    """Bonjour plus the OS queues. Failures become an empty list so the heartbeat still runs."""
+    try:
+        discovery = load_discovery()
+
+        def queues():
+            found = []
+            try:
+                found.extend(discovery.os_queues() or [])
+            except Exception:
+                pass
+            found.extend(printers())
+            return found
+
+        return discovery.discover(
+            browse=lambda: discovery.browse_mdns(timeout=1.0),
+            list_queues=queues,
+            probe=lambda address: discovery.probe_fiery(address, timeout=1.0),
+        ) or []
+    except Exception:
+        return []
+
+
 def inventory():
-    return {"hostname": socket.gethostname(), "printers": printers(),
-            "fiery_rip": [], "hot_folders": []}
+    found = discover_printers()
+    fiery = [item for item in found if item.get("isFiery")]
+    return {"hostname": socket.gethostname(), "printers": found,
+            "fiery_rip": fiery, "hot_folders": []}
 
 
 def request(api_url, path, payload, credential=None):
@@ -124,9 +180,15 @@ def run(url=None, code=None, report=print, stop=None):
     while not stop.is_set():
         try:
             if credential:
-                request(api_url, "/connector-devices/heartbeat",
-                        {"inventory": inventory()}, credential)
-                report("Connected. Printer discovery and health check complete.")
+                found = inventory()
+                result = request(api_url, "/connector-devices/heartbeat",
+                                 {"inventory": found}, credential)
+                report(f"Connected. {len(found.get('printers') or [])} printer(s) found.")
+                if isinstance(result, dict) and result.get("scan"):
+                    found = inventory()
+                    request(api_url, "/connector-devices/heartbeat",
+                            {"inventory": found, "scanned": True}, credential)
+                    report("Scanned again for printers.")
             else:
                 if not state.get("pairingId"):
                     if not code:
@@ -147,7 +209,7 @@ def run(url=None, code=None, report=print, stop=None):
                     state.pop("pairingId", None)
                     save_state(state)
                     report("Approved. Checking connection...")
-            stop.wait(30)
+            stop.wait(8)
         except urllib.error.HTTPError as error:
             if error.code == 409 and not credential and state.get("pairingId"):
                 state.pop("pairingId", None)
@@ -156,10 +218,10 @@ def run(url=None, code=None, report=print, stop=None):
             if error.code in (400, 401, 403, 404):
                 raise ValueError(f"Connection needs attention (HTTP {error.code}). Check your website and pairing code.")
             report(f"Service unavailable (HTTP {error.code}). Retrying automatically.")
-            stop.wait(30)
+            stop.wait(8)
         except (urllib.error.URLError, KeyError, OSError) as error:
             report(f"Offline or waiting for service ({type(error).__name__}). Retrying automatically.")
-            stop.wait(30)
+            stop.wait(8)
 
 
 def setup_window(self_test=False):

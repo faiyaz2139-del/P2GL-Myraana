@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from p2g.connector_auth import credential_hash, legacy_credential_hash
 from p2g.core import AppError, db, new_id, now
+from p2g.printer_discovery import normalise_reported, scan_is_due
 from p2g.printers import filter_printers
 from p2g.tenancy import PRINT2GO_SHOP_ID, bound_shop, shop_scope, unscoped
 
@@ -146,9 +147,19 @@ async def heartbeat(request, payload):
         raise AppError("Connector authentication failed.", 401)
     owner = device.get("shop_id") or PRINT2GO_SHOP_ID
     shop_id = bound_shop(owner, requested)
+    inventory = _inventory(payload.get("inventory"))
+    inventory["printers"] = normalise_reported(inventory.get("printers"))
+    scanned = payload.get("scanned") is True
     with shop_scope(shop_id):
         await db.connector_devices.update_one(
             {"_id": device["_id"]},
-            {"$set": {"lastSeen": now(), "status": "Connected", "inventory": _inventory(payload.get("inventory"))}},
+            {"$set": {"lastSeen": now(), "status": "Connected", "inventory": inventory}},
         )
-    return {"ok": True, "status": "Connected"}
+        settings = await db.settings.find_one({"kind": "settings"})
+        due = scan_is_due(settings or {}, incoming_scanned=scanned)
+        if settings:
+            fields = {"discoveredPrinters": inventory["printers"], "discoveredAt": now()}
+            if scanned:
+                fields["scanFulfilledAt"] = now()
+            await db.settings.update_one({"_id": settings["_id"]}, {"$set": fields})
+    return {"ok": True, "status": "Connected", "scan": due}

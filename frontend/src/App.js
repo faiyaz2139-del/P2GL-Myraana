@@ -346,21 +346,56 @@ function JobView({ job, reload, back, settings, user, openSettings, onArchived }
     .map((type) => `.${type}`).join(",");
   const proof = latest(job, "PRINT_READY");
   const original = latest(job, "ORIGINAL");
-  const act = async (action, extra = {}) => {
+  const act = async (action, extra = {}, options = {}) => {
     setBusy(true);
     setError("");
     setErrorCode("");
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    if (options.signal) {
+      if (options.signal.aborted) controller.abort();
+      else options.signal.addEventListener("abort", onAbort);
+    }
+    const timer = options.timeoutMs ? setTimeout(() => controller.abort(), options.timeoutMs) : null;
+    const limited = Boolean(options.timeoutMs || options.signal);
+    const untilAbort = (promise) => new Promise((resolve, reject) => {
+      const fail = () => {
+        const timeout = new Error("This took too long. Retry. Nothing was sent to a press.");
+        timeout.code = "timeout";
+        reject(timeout);
+      };
+      if (controller.signal.aborted) {
+        fail();
+        return;
+      }
+      const onLate = () => fail();
+      controller.signal.addEventListener("abort", onLate);
+      promise.then((value) => {
+        controller.signal.removeEventListener("abort", onLate);
+        resolve(value);
+      }, (reason) => {
+        controller.signal.removeEventListener("abort", onLate);
+        reject(reason);
+      });
+    });
     try {
-      await api(`jobs/${job.id}/action`, {
+      const call = api(`jobs/${job.id}/action`, {
         method: "POST",
         body: JSON.stringify({ action, generation: job.generation, ...extra }),
+        signal: limited ? controller.signal : undefined,
       });
-      await reload();
+      await (limited ? untilAbort(call) : call);
+      const follow = reload();
+      await (limited ? untilAbort(follow) : follow);
       setAck(false);
+      return { ok: true };
     } catch (reason) {
-      setError(reason.message);
+      setError(routeFailureMessage(reason));
       setErrorCode(reason.code || "");
+      return { ok: false, error: reason };
     } finally {
+      if (timer) clearTimeout(timer);
+      if (options.signal) options.signal.removeEventListener("abort", onAbort);
       setBusy(false);
     }
   };
@@ -425,7 +460,7 @@ function JobView({ job, reload, back, settings, user, openSettings, onArchived }
     if (current === 3 && !job.bleedConfirmation) return <HumanAction label="I confirm the bleed and safe area on this file." buttonLabel="Confirm bleed handling" ack={ack} setAck={setAck} busy={busy} testId="confirm-bleed" onAction={() => act("confirm-bleed", { acknowledged: ack })} />;
     if (current === 3) return <button className="primary" onClick={process} disabled={busy} data-testid="process-artwork-button"><ShieldCheck size={17} />{busy ? "Checking…" : "Prepare print-ready file"}</button>;
     if (current === 7) return <HumanAction label="I reviewed the actual proof, margins, and all notes." buttonLabel="Approve proof" ack={ack} setAck={setAck} busy={busy} testId="approve-proof" onAction={() => act("approve", { sha: proof?.sha, acknowledged: ack })} />;
-    if (current === 8) return <RouteAction job={job} settings={settings} user={user} act={act} busy={busy} errorCode={errorCode} />;
+    if (current === 8) return <RouteAction job={job} settings={settings} user={user} act={act} busy={busy} error={error} errorCode={errorCode} openSettings={openSettings} />;
     if (current === 9 && job.route?.mode === "proof-only") return <div>
       <p className="notice" data-testid="proof-only-stop">This job is a proof only, so it does not go to a press. Switch to production here if it should be printed.</p>
       <button className="primary" onClick={() => act("route", { mode: "production" })} disabled={busy} data-testid="switch-production-route-button">Switch to production route</button>
@@ -496,23 +531,183 @@ function HumanAction({ label, buttonLabel, ack, setAck, busy, onAction, testId }
   return <div><label className="check-label"><input type="checkbox" checked={ack} onChange={(event) => setAck(event.target.checked)} data-testid={`${testId}-checkbox`} />{label}</label><button className="primary" disabled={busy || !ack} onClick={onAction} data-testid={`${testId}-button`}>{buttonLabel}</button></div>;
 }
 
-function RouteAction({ job, settings, user, act, busy, errorCode }) {
+function connectorOnline(settings) {
+  if (!settings) return false;
+  if (settings.connectorConnected) return true;
+  if ((settings.pairedDevices || []).some((item) => item.status === "Connected")) return true;
+  return Boolean(settings.connected);
+}
+
+function routeFailureMessage(reason) {
+  if (!reason) return "The printer could not be verified. Retry.";
+  if (reason.code === "timeout") return "Checking the printer took too long. Retry, or choose Proof only. Nothing was sent to a press.";
+  if (reason.code === "network") return reason.message;
+  if (reason.status === 409 || reason.code === "machine-required" || reason.code === "conflict") {
+    return reason.message || "The shop could not accept this step. Retry, or choose Proof only. Nothing was sent to a press.";
+  }
+  return reason.message || "Unable to save. Please retry.";
+}
+
+function printerLabel(printer) {
+  return [printer.name, printer.isFiery ? "Fiery" : "", printer.model, printer.address].filter(Boolean).join(" · ");
+}
+
+const PICKER_IDS = {
+  settings: {
+    root: "printer-picker",
+    select: "printer-select",
+    manual: "printer-name-input",
+    scan: "scan-printers-button",
+    spinner: "settings-printer-spinner",
+    error: "settings-printer-error",
+    retry: "settings-printer-retry",
+    offline: "connector-offline-message",
+    empty: "settings-printers-empty",
+  },
+  route: {
+    root: "route-printer-picker",
+    select: "inline-printer-select",
+    manual: "inline-printer-input",
+    scan: "route-scan-printers-button",
+    spinner: "route-printer-spinner",
+    error: "route-printer-error",
+    retry: "route-printer-retry",
+    offline: "route-connector-offline",
+    empty: "route-printers-empty",
+  },
+};
+
+function PrinterPicker({ settings, selected, onSelect, user, reload, testPrefix, onOpenSettings }) {
+  const ids = PICKER_IDS[testPrefix] || PICKER_IDS.settings;
+  const [printers, setPrinters] = useState(settings?.discoveredPrinters || []);
+  const [online, setOnline] = useState(() => connectorOnline(settings));
+  const [loading, setLoading] = useState(!(settings?.discoveredPrinters || []).length);
+  const [scanning, setScanning] = useState(false);
+  const [error, setError] = useState("");
+  const onSelectRef = useRef(onSelect);
+  const scanLock = useRef(false);
+  onSelectRef.current = onSelect;
+
+  const apply = (data) => {
+    const next = data?.printers || [];
+    setPrinters(next);
+    setOnline(Boolean(data?.connectorConnected));
+    return { next, pending: Boolean(data?.scanPending), online: Boolean(data?.connectorConnected) };
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(!(settings?.discoveredPrinters || []).length);
+    api("printers/discovered", { timeoutMs: 10000 }).then((data) => {
+      if (!cancelled) apply(data);
+    }).catch((reason) => {
+      if (!cancelled) setError(reason.code === "timeout" ? "Looking for printers took too long. Retry." : (reason.message || "Printers could not be loaded. Retry."));
+    }).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [settings?.shopName]);
+
+  useEffect(() => {
+    const fierys = printers.filter((item) => item.isFiery);
+    const names = new Set(printers.map((item) => item.name));
+    if (fierys.length === 1 && (!selected || !names.has(selected))) onSelectRef.current(fierys[0].name);
+  }, [printers, selected]);
+
+  const load = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      apply(await api("printers/discovered", { timeoutMs: 10000 }));
+    } catch (reason) {
+      setError(reason.code === "timeout" ? "Looking for printers took too long. Retry." : (reason.message || "Printers could not be loaded. Retry."));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const scan = async () => {
+    if (scanLock.current) return;
+    scanLock.current = true;
+    setScanning(true);
+    setError("");
+    const started = Date.now();
+    const budget = () => 10000 - (Date.now() - started);
+    try {
+      await api("printers/scan", { method: "POST", body: "{}", timeoutMs: Math.max(1000, budget()) });
+      let latest = apply(await api("printers/discovered", { timeoutMs: Math.max(300, budget()) }));
+      if (!latest.online || (latest.next.length && !latest.pending)) {
+        if (reload) reload().catch(() => {});
+        return;
+      }
+      while (budget() > 200) {
+        latest = apply(await api("printers/discovered", { timeoutMs: Math.max(300, budget()) }));
+        if (latest.next.length && !latest.pending) break;
+        const pause = Math.min(1200, budget());
+        if (pause <= 200) break;
+        await new Promise((resolve) => setTimeout(resolve, pause));
+      }
+      if (!latest.next.length && latest.online) setError("No printers came back within 10 seconds. Retry.");
+      if (reload) reload().catch(() => {});
+    } catch (reason) {
+      setError(reason.code === "timeout" || reason.code === "network"
+        ? (reason.code === "timeout" ? "The scan took too long. Retry." : reason.message)
+        : (reason.message || "The scan could not be requested. Retry."));
+    } finally {
+      scanLock.current = false;
+      setScanning(false);
+    }
+  };
+
+  const showSpinner = (loading || scanning) && printers.length === 0;
+  const known = printers.some((item) => item.name === selected);
+  return <div data-testid={ids.root}>
+    {showSpinner && <p className="route-spinner" data-testid={ids.spinner}><i />Looking for printers. This stops after 10 seconds.</p>}
+    {online && !!printers.length && <label>Printer
+      <select value={known ? selected : ""} onChange={(event) => onSelect(event.target.value)} disabled={user?.role !== "admin"} data-testid={ids.select}>
+        <option value="">Choose a printer</option>
+        {printers.map((printer) => <option key={`${printer.name}-${printer.address || printer.port || ""}`} value={printer.name}>{printerLabel(printer)}</option>)}
+      </select>
+    </label>}
+    {online && !printers.length && !showSpinner && <p data-testid={ids.empty}>No printers yet. Scan again, or check that the press is turned on.</p>}
+    {!online && <div className="notice warning" data-testid={ids.offline}>
+      <p>The shop connector is not connected, so Myraana cannot see printer names. In Shop settings, download the Windows Connector, click Pair connector, enter {typeof window !== "undefined" ? window.location.origin : "this website"} and the one-time code in the connector window, click Connect, then Approve the computer. A Mac or Linux shop computer can download the connector script and run it with Python 3 using the same code. As a last resort, type the press name below.</p>
+      {onOpenSettings && <button type="button" className="button" onClick={onOpenSettings} data-testid={`${testPrefix}-open-settings`}>Open shop settings</button>}
+    </div>}
+    {!online && user?.role === "admin" && <label>Printer name<input value={selected} onChange={(event) => onSelect(event.target.value)} data-testid={ids.manual} /></label>}
+    {user?.role === "admin" && <div className="action-row">
+      <button type="button" className="button" onClick={scan} disabled={scanning} data-testid={ids.scan}>{scanning ? "Scanning…" : "Scan again"}</button>
+      {error && <button type="button" className="button" onClick={load} data-testid={ids.retry}>Retry</button>}
+    </div>}
+    {error && <p className="notice warning" data-testid={ids.error}>{error}</p>}
+  </div>;
+}
+
+function RouteAction({ job, settings, user, act, busy, error, errorCode, openSettings }) {
   const [printer, setPrinter] = useState(settings?.printer || "");
   const [localError, setLocalError] = useState("");
+  const [working, setWorking] = useState(false);
+  useEffect(() => {
+    setPrinter((current) => current || settings?.printer || "");
+  }, [settings?.printer]);
   const stocks = settings?.stocks || [];
   const verified = settings?.verifiedPrinters || [];
   const stockListed = stocks.includes(job.stock);
-  const printerOk = Boolean(printer.trim()) && (verified.length === 0 || verified.includes(printer.trim()));
+  const savedPrinter = (settings?.printer || "").trim();
+  const printerOk = Boolean(printer.trim()) && printer.trim() === savedPrinter && (verified.length === 0 || verified.includes(printer.trim()));
   const needsSetup = !stockListed || !printerOk;
   const verifyAndRoute = async () => {
     const name = printer.trim();
     if (name.length < 2) {
-      setLocalError("Type the press name. Virtual printers such as Print to PDF cannot be used.");
+      setLocalError("Choose the press Myraana found. Virtual printers such as Print to PDF cannot be used.");
       return;
     }
+    setWorking(true);
     setLocalError("");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
     try {
-      await api("printers/verify", { method: "POST", body: JSON.stringify({ name, use: true }) });
+      await api("printers/verify", { method: "POST", body: JSON.stringify({ name, use: true }), signal: controller.signal });
       await api("settings", {
         method: "POST",
         body: JSON.stringify({
@@ -522,26 +717,36 @@ function RouteAction({ job, settings, user, act, busy, errorCode }) {
           sides: [1, 2],
           instructions: settings?.instructions || "",
         }),
+        signal: controller.signal,
       });
-      await act("route", { mode: "production" });
+      const outcome = await act("route", { mode: "production" }, { signal: controller.signal });
+      if (outcome && outcome.ok === false) setLocalError(routeFailureMessage(outcome.error));
     } catch (reason) {
-      setLocalError(reason.message);
+      setLocalError(routeFailureMessage(reason));
+    } finally {
+      clearTimeout(timer);
+      setWorking(false);
     }
+  };
+  const choose = (mode) => {
+    setLocalError("");
+    return act("route", { mode }, { timeoutMs: 10000 });
   };
   return <div data-testid="route-step">
     <p className="notice">
       {needsSetup
-        ? `${job.stock} ${stockListed ? "is on the press list" : "is not on the press list yet"}. ${printerOk ? `${printer} can run it.` : "Type the shop press and verify it here. You do not need to leave this job."}`
+        ? `${job.stock} ${stockListed ? "is on the press list" : "is not on the press list yet"}. ${printerOk ? `${printer} can run it.` : "Choose the press Myraana found and verify it here. You do not need to leave this job."}`
         : `${printer} can run ${job.stock}. Production stages the file. Proof only stops before the press.`}
     </p>
-    {user?.role === "admin" && needsSetup && <label>Printer name<input value={printer} onChange={(event) => setPrinter(event.target.value)} data-testid="inline-printer-input" /></label>}
+    <PrinterPicker settings={settings} selected={printer} onSelect={setPrinter} user={user} testPrefix="route" onOpenSettings={openSettings} />
+    {working && <p className="route-spinner" data-testid="route-step-spinner"><i />Checking the printer. This stops after 10 seconds if the shop does not answer.</p>}
     <div className="action-row">
-      <button className="primary" onClick={() => act("route", { mode: "production" })} disabled={busy || needsSetup} data-testid="select-route-button">Use production route</button>
-      {user?.role === "admin" && needsSetup && <button className="button" onClick={verifyAndRoute} disabled={busy || printer.trim().length < 2} data-testid="inline-verify-printer-button">Verify printer and add this stock</button>}
-      <button className="button" onClick={() => act("route", { mode: "proof-only" })} disabled={busy} data-testid="proof-only-route-button">Proof only</button>
+      <button className="primary" onClick={() => choose("production")} disabled={busy || working || needsSetup} data-testid="select-route-button">Use production route</button>
+      {user?.role === "admin" && needsSetup && <button className="button" onClick={verifyAndRoute} disabled={busy || working || printer.trim().length < 2} data-testid="inline-verify-printer-button">{working ? "Checking…" : "Verify printer and add this stock"}</button>}
+      <button className="button" onClick={() => choose("proof-only")} disabled={busy || working} data-testid="proof-only-route-button">Proof only</button>
     </div>
     {user?.role !== "admin" && needsSetup && <p className="notice warning" data-testid="route-admin-needed">A shop admin needs to verify a printer for this stock. You can choose Proof only now.</p>}
-    {(localError || errorCode === "machine-required") && <p className="notice warning" data-testid="machine-required-notice">{localError || "Verify the printer above, or choose Proof only. Nothing is sent to a press until you do."}</p>}
+    {(localError || errorCode === "machine-required" || errorCode === "conflict" || errorCode === "timeout" || errorCode === "network") && <p className="notice warning" data-testid="machine-required-notice">{localError || error || "Verify the printer above, or choose Proof only. Nothing is sent to a press until you do."}</p>}
   </div>;
 }
 
@@ -698,10 +903,15 @@ function ConnectorPairing({ settings, reload }) {
   return <section className="settings-card" data-testid="connector-pairing-panel">
     <div className="section-heading"><h3>Connect Windows Connector</h3><Link2 /></div>
     <p data-testid="connector-pairing-scope">This code pairs a connector for this shop only. Discovery is read-only. It cannot print, change printer settings, or release jobs.</p>
-    <a className="button" href="https://github.com/faiyaz2139-del/P2GL-Myraana/releases/download/windows-connector-preview/MyraanaConnector.zip" data-testid="download-windows-connector-link">
-      <Download size={16} />Download Windows Connector
-    </a>
-    <ol className="muted"><li>Download and extract the ZIP, then open MyraanaConnector.exe.</li><li>Click Pair connector here. Enter this website and the code in the connector window: <strong>{window.location.origin}</strong></li><li>Click Connect in the window, then Approve below.</li></ol>
+    <div className="action-row">
+      <a className="button" href="https://github.com/faiyaz2139-del/P2GL-Myraana/releases/download/windows-connector-preview/MyraanaConnector.zip" data-testid="download-windows-connector-link">
+        <Download size={16} />Download Windows Connector
+      </a>
+      <a className="button" href="/setup/myraana-connector.py" download data-testid="download-connector-script-link">
+        <Download size={16} />Mac or Linux script
+      </a>
+    </div>
+    <ol className="muted"><li>On Windows, download and extract the ZIP, then open MyraanaConnector.exe. On a Mac or Linux computer that can see the press, download the script and run it with Python 3.</li><li>Click Pair connector here. Enter this website and the code in the connector window: <strong>{window.location.origin}</strong></li><li>Click Connect, then Approve below. The connector finds printers by itself. You do not type a printer name.</li></ol>
     <p className="muted">Windows 10/11 only · Preview version · No Python or PowerShell setup required.</p>
     <button className="primary" onClick={start} data-testid="start-connector-pairing-button">
       Pair connector
@@ -861,11 +1071,11 @@ function DiscoveredPrinters({ settings, user, reload }) {
     <div className="section-heading"><h3>Discovered printers</h3><Printer /></div>
     <p>Virtual printers such as Microsoft Print to PDF, OneNote, and Adobe PDF are hidden. A connected computer is not the same as a verified press.</p>
     {message && <p className="notice" data-testid="printer-verify-message">{message}</p>}
-    {!rows.length && <p data-testid="printers-empty">No physical printers reported yet. A job can still use a proof-only route.</p>}
+    {!rows.length && <p data-testid="printers-empty">{connectorOnline(settings) ? "No physical printers reported yet. Use Scan again above. A job can still use a proof-only route." : "No printers yet. Start the shop connector and it will report them. A job can still use a proof-only route."}</p>}
     {rows.map((printer) => {
       const slug = printer.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "printer";
-      return <div className="version-row" key={`${printer.name}-${printer.port}`} data-testid={`printer-row-${slug}`}>
-        <span><strong>{printer.name}</strong><br />{printer.deviceStatus} · {printer.productionStatus}</span>
+      return <div className="version-row" key={`${printer.name}-${printer.address || printer.port}`} data-testid={`printer-row-${slug}`}>
+        <span><strong>{printer.name}{printer.isFiery ? " · Fiery" : ""}</strong><br />{[printer.model, printer.address, printer.protocol, printer.deviceStatus, printer.productionStatus].filter(Boolean).join(" · ")}</span>
         {user.role === "admin" && printer.productionStatus !== "Verified"
           ? <button className="button" onClick={() => verify(printer)} data-testid={`verify-printer-${slug}`}>Verify</button>
           : <Badge status={printer.productionStatus} />}
@@ -877,6 +1087,8 @@ function DiscoveredPrinters({ settings, user, reload }) {
 function Settings({ settings, user, reload }) {
   const [message, setMessage] = useState("");
   const [build, setBuild] = useState(null);
+  const [printer, setPrinter] = useState(settings?.printer || "");
+  const online = connectorOnline(settings);
   useEffect(() => { api("build-info").then(setBuild).catch(() => setBuild(null)); }, []);
   const save = async (event) => {
     event.preventDefault();
@@ -886,7 +1098,7 @@ function Settings({ settings, user, reload }) {
         method: "POST",
         body: JSON.stringify({
           shopName: form.get("shopName"),
-          printer: form.get("printer"),
+          printer,
           stocks: String(form.get("stocks")).split("\n").filter(Boolean),
           sides: [1, 2],
           instructions: form.get("instructions"),
@@ -905,7 +1117,7 @@ function Settings({ settings, user, reload }) {
         <h1>Shop settings</h1>
         <p className="muted">Route, artwork rules, printers, and operators.</p>
       </div>
-      <Badge status={settings.connected ? "Connected" : "Offline"} />
+      <Badge status={online ? "Connected" : "Offline"} />
     </div>
     <div className="settings-layout"><div>
       <section className="settings-card">
@@ -914,7 +1126,7 @@ function Settings({ settings, user, reload }) {
         <form onSubmit={save} data-testid="settings-form">
           <fieldset disabled={user.role !== "admin"}>
             <label>Shop name<input name="shopName" defaultValue={settings.shopName || "Print2Go"} maxLength="80" data-testid="shop-name-input" /></label>
-            <label>Printer name<input name="printer" defaultValue={settings.printer} data-testid="printer-name-input" /></label>
+            <PrinterPicker settings={settings} selected={printer} onSelect={setPrinter} user={user} reload={reload} testPrefix="settings" />
             <label>Supported stocks<textarea name="stocks" defaultValue={(settings.stocks || []).join("\n")} data-testid="stocks-input" /></label>
             <label>Handoff instructions<textarea name="instructions" defaultValue={settings.instructions} data-testid="handoff-instructions-input" /></label>
             <button className="primary" data-testid="save-settings-button">Save shop settings</button>
@@ -925,7 +1137,7 @@ function Settings({ settings, user, reload }) {
       <DiscoveredPrinters settings={settings} user={user} reload={reload} />
       <section className="settings-card">
         <div className="section-heading"><h3>Connect shop</h3><Link2 /></div>
-        <p data-testid="connector-status">{settings.connected ? "The connector reports a writable destination." : "No verified local connection. Use a proof-only route until a press is verified."}</p>
+        <p data-testid="connector-status">{online ? "The shop connector is connected. It reports printers on this network, and Scan again asks it to look now." : "The shop connector is not connected. Download it below, click Pair connector, enter this website and the one-time code, click Connect, then Approve. Until then a proof-only route is available, and an admin can type a press name as a last resort."}</p>
         <p data-testid="connector-shop-note">Each shop pairs its own Windows Connector from this page. The pairing code belongs to this shop only.</p>
         {settings.legacyConnector && <a className="button" href="/setup/print2go-connector.py" download data-testid="download-connector-link"><Download size={16} />Download Print2Go legacy connector</a>}
         <details className="technical"><summary data-testid="connector-setup-summary">Connection setup</summary><ol><li>Pair this shop’s Windows Connector with the one-time code below. No shared secret is required.</li><li>The original Print2Go installation can keep using its server connector secret. That secret does not open another shop.</li><li>The connector stages authorized PDFs only. It never prints.</li></ol></details>
@@ -938,7 +1150,7 @@ function Settings({ settings, user, reload }) {
       <ShieldCheck size={26} />
       <h3>A shop you can trust.</h3>
       <p data-testid="assistant-status">Assistant: {settings.aiConnected ? "configured; first request verifies access" : "server setup needed"}</p>
-      <p>Local shop: {settings.connected ? "Connected" : "Offline"}</p>
+      <p>Local shop: {online ? "Connected" : "Offline"}</p>
       <p>Billing: {settings.billing?.enabled ? "configured" : "off"}</p>
       <p>RIP integration: operator-assisted.</p>
       {build && <p data-testid="build-info">Build {build.commit} · {build.builtAt}</p>}
