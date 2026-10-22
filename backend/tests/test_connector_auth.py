@@ -68,6 +68,61 @@ def test_shared_connector_secret_rejects_another_shop():
         assert error.code == "connector-shop"
 
 
+def test_london_pairing_keeps_that_shop():
+    """A print2go-london admin's code must not fall back to Print2Go."""
+    from pathlib import Path
+
+    from p2g.connector_auth import build_pairing_document, shop_for_connected_pairing
+
+    user = {"id": "admin-london", "role": "admin", "shop_id": "print2go-london"}
+    document = build_pairing_document(
+        user,
+        pairing_id="pair-london",
+        code_hash="hash",
+        expires_at="2099-01-01T00:00:00+00:00",
+        created_at="2026-10-22T00:00:00+00:00",
+        current_shop=None,
+    )
+    assert document["shop_id"] == "print2go-london"
+    assert document["created_by"] == "admin-london"
+    assert shop_for_connected_pairing(document) == "print2go-london"
+    same_scope = build_pairing_document(
+        user,
+        pairing_id="pair-london-scoped",
+        code_hash="hash",
+        expires_at="2099-01-01T00:00:00+00:00",
+        created_at="2026-10-22T00:00:00+00:00",
+        current_shop="print2go-london",
+    )
+    assert same_scope["shop_id"] == "print2go-london"
+    # The user's shop wins even if the request scope still says Print2Go.
+    # The tenant write then rejects the foreign shop instead of storing Print2Go.
+    preferred = build_pairing_document(
+        user,
+        pairing_id="pair-london-preferred",
+        code_hash="hash",
+        expires_at="2099-01-01T00:00:00+00:00",
+        created_at="2026-10-22T00:00:00+00:00",
+        current_shop=PRINT2GO_SHOP_ID,
+    )
+    assert preferred["shop_id"] == "print2go-london"
+    assert shop_for_connected_pairing({}) is None
+    assert shop_for_connected_pairing({"shop_id": ""}) is None
+    assert build_pairing_document(
+        {"id": "nobody"},
+        pairing_id="pair-missing",
+        code_hash="hash",
+        expires_at="2099-01-01T00:00:00+00:00",
+        created_at="2026-10-22T00:00:00+00:00",
+        current_shop=None,
+    ) is None
+    source = Path(__file__).resolve().parents[1] / "p2g" / "connector_pairing.py"
+    text = source.read_text(encoding="utf-8")
+    assert "build_pairing_document(" in text
+    assert "shop_for_connected_pairing(pairing)" in text
+    assert 'pairing.get("shop_id") or PRINT2GO_SHOP_ID' not in text
+
+
 def test_pairing_created_for_one_shop_is_hidden_from_another():
     asyncio.run(_pairing_created_for_one_shop_is_hidden_from_another())
 

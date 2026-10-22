@@ -5,12 +5,17 @@ from datetime import datetime, timedelta, timezone
 
 from p2g.account_access import exclude_archived
 from p2g.card_flow import AUTO_ACTOR, hold_failure_message, record_successful_hold
-from p2g.connector_auth import credential_hash, legacy_credential_hash
+from p2g.connector_auth import (
+    build_pairing_document,
+    credential_hash,
+    legacy_credential_hash,
+    shop_for_connected_pairing,
+)
 from p2g.core import AppError, db, new_id, now
 from p2g.fiery_hold import interpret_hold_report
 from p2g.printer_discovery import normalise_reported, scan_is_due
 from p2g.printers import filter_printers
-from p2g.tenancy import PRINT2GO_SHOP_ID, bound_shop, shop_scope, unscoped
+from p2g.tenancy import PRINT2GO_SHOP_ID, bound_shop, current_shop_id, shop_scope, unscoped
 from p2g.workflow import file_bytes, get_job, latest, record_event, save_job, update_task
 
 
@@ -37,14 +42,16 @@ def _inventory(value):
 
 async def create_pairing(user):
     code = "".join(secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789") for _ in range(8))
-    pairing = {
-        "_id": new_id(),
-        "status": "Searching",
-        "code_hash": credential_hash(code),
-        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
-        "created_by": user["id"],
-        "created_at": now(),
-    }
+    pairing = build_pairing_document(
+        user,
+        pairing_id=new_id(),
+        code_hash=credential_hash(code),
+        expires_at=(datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+        created_at=now(),
+        current_shop=current_shop_id(),
+    )
+    if not pairing:
+        raise AppError("Sign in to your shop.", 401)
     await db.connector_pairings.insert_one(pairing)
     return {"id": pairing["_id"], "code": code, "expiresIn": 600}
 
@@ -82,8 +89,11 @@ async def pairing_status(pairing_id, claim):
         raise AppError("Connector claim is invalid.", 401)
     if pairing["status"] != "Connected":
         return {"status": pairing["status"]}
+    shop_id = shop_for_connected_pairing(pairing)
+    if not shop_id:
+        raise AppError("Pairing is not bound to a shop.", 409)
     credential = secrets.token_urlsafe(48)
-    with shop_scope(pairing.get("shop_id") or PRINT2GO_SHOP_ID):
+    with shop_scope(shop_id):
         await db.connector_devices.update_one(
             {"_id": pairing["device_id"]},
             {"$set": {"credential_hash": credential_hash(credential), "enabled": True,

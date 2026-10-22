@@ -46,3 +46,42 @@ def select_device(devices, credential, secret):
 def legacy_shared_secret_shop(requested_shop):
     """The bearer CONNECTOR_SECRET path is Print2Go only."""
     return bound_shop(PRINT2GO_SHOP_ID, requested_shop)
+
+
+def pairing_shop_id(user, current_shop=None):
+    """Shop that owns a new pairing code.
+
+    The creating user's shop wins. A request that is already in that shop
+    passes the same id as current_shop. A missing shop stays missing so the
+    caller can refuse it. Print2Go is never filled in for another shop.
+    """
+    shop = str((user or {}).get("shop_id") or "").strip()
+    if not shop:
+        shop = str(current_shop or "").strip()
+    return shop or None
+
+
+def build_pairing_document(user, *, pairing_id, code_hash, expires_at, created_at, current_shop=None):
+    """Pairing row written by create_pairing. shop_id is the creating user's shop."""
+    shop_id = pairing_shop_id(user, current_shop)
+    if not shop_id or not user or not user.get("id"):
+        return None
+    return {
+        "_id": pairing_id,
+        "status": "Searching",
+        "code_hash": code_hash,
+        "expires_at": expires_at,
+        "created_by": user["id"],
+        "created_at": created_at,
+        "shop_id": shop_id,
+    }
+
+
+def shop_for_connected_pairing(pairing):
+    """Shop that receives the connector device once the code is approved.
+
+    A missing shop_id is not Print2Go. Callers must refuse that pairing
+    instead of attaching the computer to the wrong shop.
+    """
+    shop = str((pairing or {}).get("shop_id") or "").strip()
+    return shop or None

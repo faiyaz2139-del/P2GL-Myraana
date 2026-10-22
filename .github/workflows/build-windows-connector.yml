@@ -11,6 +11,7 @@ on:
       - main
     paths:
       - "frontend/public/setup/**"
+      - "artifacts/myraana-windows-connector/**"
       - ".github/workflows/build-windows-connector.yml"
   workflow_dispatch:
 
@@ -78,7 +79,7 @@ jobs:
         run: |
           $exe = Join-Path $env:CONNECTOR_DIR "dist\MyraanaConnector\MyraanaConnector.exe"
           if (-not (Test-Path $exe)) { throw "Connector executable missing" }
-          python -c "import subprocess,sys; p=subprocess.run([sys.argv[1],'--self-test'],capture_output=True,text=True,timeout=30); print(p.stdout+p.stderr); assert p.returncode == 0, 'Connector setup window smoke test failed'" "$exe"
+          python -c "import subprocess,sys; p=subprocess.run([sys.argv[1],'--self-test'],capture_output=True,text=True,timeout=30); print(p.stdout+p.stderr); assert p.returncode == 0, 'Frozen connector failed to import discovery and fiery_hold'" "$exe"
 
       - name: Upload unsigned preview installer
         uses: actions/upload-artifact@v4
@@ -101,15 +102,15 @@ jobs:
           "$hash  MyraanaConnector.zip" | Set-Content -Path $checksum -Encoding ascii
           $notes = Join-Path $env:RUNNER_TEMP "connector-release-notes.md"
           @"
-          Unsigned Windows preview with a simple setup window. Extract the ZIP and open MyraanaConnector.exe.
-          Read-only discovery, pairing and health checks. No printing or printer-setting changes.
+          Unsigned Windows connector with a simple setup window. Extract the ZIP and open MyraanaConnector.exe.
+          This connector finds your printers and can place approved PRINT_READY files on your Fiery HOLD queue. It never prints or releases jobs.
           Source commit: $env:GITHUB_SHA
           ZIP SHA-256: $hash
           Real shop hardware acceptance remains required.
           "@ | Set-Content -Path $notes -Encoding utf8
           gh release view windows-connector-preview *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create windows-connector-preview --target $env:GITHUB_SHA --title "Myraana Windows Connector — Preview" --prerelease --latest=false --notes-file $notes
+            gh release create windows-connector-preview --target $env:GITHUB_SHA --title "Myraana Windows Connector" --prerelease --latest=false --notes-file $notes
             if ($LASTEXITCODE -ne 0) { throw "Preview release creation failed" }
           }
           gh release upload windows-connector-preview $package $checksum --clobber

@@ -1,10 +1,9 @@
-"""Preview Windows connector: read-only discovery, pairing, and HTTPS heartbeats.
+"""Windows connector: printer discovery, pairing, and HTTPS heartbeats.
 
 The pairing code is created in one shop's settings and only joins that shop.
-This program does not use CONNECTOR_SECRET. It never prints, creates test pages,
-or changes printer settings. When Myraana asks, it can place a PRINT_READY file
-on a Fiery hold queue or in a Hold hot folder. Build on Windows with the
-adjacent PowerShell script.
+This program does not use CONNECTOR_SECRET. It never prints or releases jobs.
+When Myraana asks, it can place a PRINT_READY file on a Fiery HOLD queue.
+Build on Windows with the adjacent PowerShell script.
 """
 import argparse
 import importlib.util
@@ -29,6 +28,24 @@ except ImportError:
 
 STATE_PATH = os.path.join(os.environ.get("LOCALAPPDATA", "."), "Myraana", "connector.json")
 SERVICE = "MyraanaConnector"
+DEFAULT_WEBSITE = "https://myraana.com"
+REPAIR_MESSAGE = (
+    "This computer needs to be paired again. Create a pairing code in "
+    "Myraana Shop settings and enter it here."
+)
+POLL_MISMATCH_MESSAGE = (
+    "This pairing no longer matches. Create a new pairing code in "
+    "Myraana Shop settings and enter it here."
+)
+CODE_FORMAT_MESSAGE = "The pairing code must be 8 characters."
+CODE_EXPIRED_MESSAGE = (
+    "That pairing code is invalid or expired. Create a new one in Myraana Shop settings."
+)
+WEBSITE_MESSAGE = "That website was not found. Check the Myraana website address."
+HOLD_FOOTER = (
+    "This connector finds your printers and can place approved PRINT_READY files "
+    "on your Fiery HOLD queue. It never prints or releases jobs."
+)
 
 
 def load_state():
@@ -54,33 +71,61 @@ def secret(name, value=None):
     return keyring.get_password(SERVICE, name)
 
 
-_DISCOVERY = None
+def forget_secret(name):
+    """Drop one saved credential. A missing entry is already forgotten."""
+    if not keyring:
+        return
+    try:
+        keyring.delete_password(SERVICE, name)
+    except Exception:
+        return
 
 
-def load_discovery():
-    """The discovery module ships beside this script and in the repo backend."""
-    global _DISCOVERY
-    if _DISCOVERY is not None:
-        return _DISCOVERY
+def normalize_code(value):
+    """Pairing codes are shown in groups. Spaces and dashes are not part of the code."""
+    return str(value or "").upper().replace(" ", "").replace("-", "").strip()
+
+
+def module_candidates(filename):
+    """Frozen bundle first (_MEIPASS, then the exe directory), then the script directory."""
     here = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(here, "printer_discovery.py"),
-        os.path.normpath(os.path.join(here, "..", "..", "..", "backend", "p2g", "printer_discovery.py")),
-        os.path.normpath(os.path.join(here, "..", "..", "backend", "p2g", "printer_discovery.py")),
-    ]
+    candidates = []
     if getattr(sys, "frozen", False):
         meipass = getattr(sys, "_MEIPASS", "")
         if meipass:
-            candidates.insert(0, os.path.join(meipass, "printer_discovery.py"))
-        candidates.insert(0, os.path.join(os.path.dirname(sys.executable), "printer_discovery.py"))
-    for candidate in candidates:
+            candidates.append(os.path.join(meipass, filename))
+        candidates.append(os.path.join(os.path.dirname(sys.executable), filename))
+    candidates.append(os.path.join(here, filename))
+    backend = os.path.join("backend", "p2g", filename)
+    candidates.append(os.path.normpath(os.path.join(here, "..", "..", "..", backend)))
+    candidates.append(os.path.normpath(os.path.join(here, "..", "..", backend)))
+    return candidates
+
+
+def load_python_module(filename, module_name):
+    for candidate in module_candidates(filename):
         if os.path.isfile(candidate):
-            spec = importlib.util.spec_from_file_location("myraana_printer_discovery", candidate)
+            spec = importlib.util.spec_from_file_location(module_name, candidate)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            _DISCOVERY = module
             return module
-    raise RuntimeError("Printer discovery is unavailable.")
+    return None
+
+
+_DISCOVERY = None
+_FIERY = None
+
+
+def load_discovery():
+    """The discovery module ships beside this script and in the frozen bundle."""
+    global _DISCOVERY
+    if _DISCOVERY is not None:
+        return _DISCOVERY
+    module = load_python_module("printer_discovery.py", "myraana_printer_discovery")
+    if module is None:
+        raise RuntimeError("Printer discovery is unavailable.")
+    _DISCOVERY = module
+    return module
 
 
 def printers():
@@ -155,11 +200,24 @@ def request_bytes(api_url, path, credential):
 
 
 def load_fiery_hold():
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fiery_hold.py")
-    spec = importlib.util.spec_from_file_location("fiery_hold", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    """Same lookup as discovery: frozen bundle, exe directory, then this script."""
+    global _FIERY
+    if _FIERY is not None:
+        return _FIERY
+    module = load_python_module("fiery_hold.py", "myraana_fiery_hold")
+    if module is None:
+        raise RuntimeError("Fiery hold support is unavailable.")
+    _FIERY = module
     return module
+
+
+def exercise_bundled_modules():
+    """Import discovery and Fiery HOLD. The packaged exe must be able to do both."""
+    discovery = load_discovery()
+    fiery = load_fiery_hold()
+    if not hasattr(discovery, "discover") or not hasattr(fiery, "submit_hold"):
+        raise RuntimeError("Connector bundle is missing discovery or Fiery hold support.")
+    return discovery, fiery
 
 
 def perform_holds(api_url, credential, result, opener=None):
@@ -233,7 +291,16 @@ def run(url=None, code=None, report=print, stop=None):
     state.pop("claimSecret", None)
     state.pop("credential", None)
     save_state(state)
-    code = (code or os.environ.get("MYRAANA_PAIRING_CODE", "")).strip().upper()
+    code = normalize_code(code or os.environ.get("MYRAANA_PAIRING_CODE", ""))
+    if code and len(code) != 8:
+        raise ValueError(CODE_FORMAT_MESSAGE)
+    # A typed code replaces a saved credential. The old token may belong to a
+    # device the shop removed, or to a database that was reset.
+    if code and credential:
+        forget_secret("credential")
+        credential = None
+        state.pop("pairingId", None)
+        save_state(state)
     while not stop.is_set():
         try:
             if credential:
@@ -273,12 +340,26 @@ def run(url=None, code=None, report=print, stop=None):
                     report("Approved. Checking connection...")
             stop.wait(8)
         except urllib.error.HTTPError as error:
-            if error.code == 409 and not credential and state.get("pairingId"):
+            if error.code == 401 and credential:
+                forget_secret("credential")
+                credential = None
                 state.pop("pairingId", None)
                 save_state(state)
-                raise ValueError("Pairing expired. Create a new code in Myraana and connect again.")
-            if error.code in (400, 401, 403, 404):
-                raise ValueError(f"Connection needs attention (HTTP {error.code}). Check your website and pairing code.")
+                raise ValueError(REPAIR_MESSAGE)
+            if error.code == 401:
+                state.pop("pairingId", None)
+                save_state(state)
+                raise ValueError(POLL_MISMATCH_MESSAGE)
+            if error.code == 400:
+                raise ValueError(CODE_FORMAT_MESSAGE)
+            if error.code == 409:
+                state.pop("pairingId", None)
+                save_state(state)
+                raise ValueError(CODE_EXPIRED_MESSAGE)
+            if error.code == 404:
+                raise ValueError(WEBSITE_MESSAGE)
+            if error.code == 403:
+                raise ValueError("Myraana refused this connection. Check the website and try again.")
             report(f"Service unavailable (HTTP {error.code}). Retrying automatically.")
             stop.wait(8)
         except (urllib.error.URLError, KeyError, OSError) as error:
@@ -287,26 +368,28 @@ def run(url=None, code=None, report=print, stop=None):
 
 
 def setup_window(self_test=False):
+    if self_test:
+        exercise_bundled_modules()
     import tkinter as tk
     from tkinter import ttk
 
     root = tk.Tk()
-    root.title("Myraana Connector — Preview")
-    root.geometry("560x370")
+    root.title("Myraana Connector")
+    root.geometry("560x430")
     root.resizable(False, False)
     frame = ttk.Frame(root, padding=24)
     frame.pack(fill="both", expand=True)
     ttk.Label(frame, text="Connect your Windows computer",
               font=("Segoe UI", 16, "bold")).pack(anchor="w")
-    ttk.Label(frame, text="Use your Myraana preview website and its pairing code.").pack(anchor="w", pady=(8, 18))
+    ttk.Label(frame, text="Use your Myraana website and its pairing code.").pack(anchor="w", pady=(8, 18))
     state = load_state()
-    ttk.Label(frame, text="Myraana preview website").pack(anchor="w")
-    url = tk.StringVar(value=os.environ.get("MYRAANA_URL") or state.get("websiteUrl", ""))
+    ttk.Label(frame, text="Myraana website").pack(anchor="w")
+    url = tk.StringVar(value=os.environ.get("MYRAANA_URL") or state.get("websiteUrl") or DEFAULT_WEBSITE)
     url_entry = ttk.Entry(frame, textvariable=url, width=64)
     url_entry.pack(fill="x", pady=(4, 12))
     ttk.Label(frame, text="Pairing code (leave blank when reconnecting)").pack(anchor="w")
     code = tk.StringVar(value=os.environ.get("MYRAANA_PAIRING_CODE", ""))
-    code_entry = ttk.Entry(frame, textvariable=code, show="*", width=64)
+    code_entry = ttk.Entry(frame, textvariable=code, width=64)
     code_entry.pack(fill="x", pady=(4, 12))
     status = tk.StringVar(value="Ready to connect.")
     events = queue.Queue()
@@ -342,8 +425,7 @@ def setup_window(self_test=False):
     button = ttk.Button(frame, text="Connect", command=connect)
     button.pack(anchor="w", pady=(0, 12))
     ttk.Label(frame, textvariable=status, wraplength=500).pack(anchor="w")
-    ttk.Label(frame, text="Preview only. This connector cannot print or change printer settings.",
-              wraplength=500).pack(anchor="w", pady=(16, 0))
+    ttk.Label(frame, text=HOLD_FOOTER, wraplength=500).pack(anchor="w", pady=(16, 0))
 
     def poll():
         try:
@@ -365,7 +447,7 @@ def setup_window(self_test=False):
 
     root.protocol("WM_DELETE_WINDOW", close)
     if self_test:
-        # Exercise the packaged Tk runtime without discovery, credentials or network.
+        # Discovery and Fiery HOLD were loaded above. Close the window without connecting.
         root.update()
         root.after(100, close)
     else:
