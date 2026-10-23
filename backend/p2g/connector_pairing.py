@@ -253,10 +253,6 @@ async def _pending_holds(settings, inventory, device_id=None):
     query = {"state": "active", "fieryHold.status": "queued"}
     if (settings or {}).get("fieryAutoSend") is not True:
         query["fieryHold.explicit"] = True
-    folders = inventory.get("hot_folders") or []
-    hot = ""
-    if folders and isinstance(folders[0], dict):
-        hot = str(folders[0].get("path") or "")[:300]
     queued = await db.jobs.find(
         exclude_archived(query),
         {"_id": 0, "id": 1, "customer": 1, "cardRoute": 1, "finish": 1, "stock": 1, "fieryHold": 1},
@@ -274,7 +270,6 @@ async def _pending_holds(settings, inventory, device_id=None):
                 "preset": "London BC",
                 "stock": job.get("finish") or job.get("stock") or "",
                 "address": fiery.get("address") or "",
-                "hotFolder": hot,
             }
         )
     return outgoing

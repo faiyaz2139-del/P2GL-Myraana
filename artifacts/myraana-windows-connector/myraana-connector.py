@@ -262,20 +262,38 @@ def exercise_tray_support():
     return pystray
 
 
-def perform_holds(api_url, credential, result, opener=None):
-    """Submit queued PRINT_READY files to HOLD. A failure is reported, never printed."""
+def perform_holds(api_url, credential, result, opener=None, printers=None):
+    """Submit queued PRINT_READY files to a Fiery this computer discovered.
+
+    A server address, UNC path, or hot folder is not used unless the address is a
+    private Fiery in ``printers``. The file is never printed.
+    """
     holds = result.get("holds") if isinstance(result, dict) else None
     if not holds:
         return None
     fiery = load_fiery_hold()
+    printers = printers if isinstance(printers, list) else []
     reports = []
     for item in holds:
         if not isinstance(item, dict) or not item.get("jobId"):
             continue
         try:
+            address = fiery.hold_target(item.get("address") or "", printers)
+        except Exception as error:
+            message = str(error).strip() or "This computer did not discover that Fiery. Nothing was printed."
+            reports.append({
+                "jobId": item["jobId"],
+                "ok": False,
+                "held": False,
+                "printed": False,
+                "method": "",
+                "error": message,
+            })
+            continue
+        try:
             pdf = request_bytes(api_url, f"/connector-devices/holds/{item['jobId']}", credential)
             outcome = fiery.submit_hold(
-                address=item.get("address") or "",
+                address=address,
                 filename=item.get("filename") or "artwork_PRINT_READY.pdf",
                 preset=item.get("preset") or "London BC",
                 stock=item.get("stock") or "",
@@ -283,7 +301,7 @@ def perform_holds(api_url, credential, result, opener=None):
                 job_name=item.get("jobName") or "",
                 job_id=item.get("jobId") or "",
                 credentials=load_fiery_credentials(),
-                hot_folder=item.get("hotFolder") or None,
+                printers=printers,
                 opener=opener,
             )
         except Exception:
@@ -507,7 +525,8 @@ def run(url=None, code=None, report=print, stop=None, scan_now=None):
                     result = request(api_url, "/connector-devices/heartbeat",
                             {"inventory": found, "scanned": True}, credential)
                     report("Scanned again for printers.")
-                reports = perform_holds(api_url, credential, result)
+                local_printers = found.get("printers") if isinstance(found, dict) else None
+                reports = perform_holds(api_url, credential, result, printers=local_printers or [])
                 if reports:
                     request(api_url, "/connector-devices/heartbeat",
                             {"inventory": found, "holds": reports}, credential)

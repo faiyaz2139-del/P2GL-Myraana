@@ -26,13 +26,16 @@ from p2g.card_flow import (
 from p2g.fiery_hold import (
     assert_pinned_peer,
     build_ipp_print_job,
+    discovered_fiery_ips,
     fiery_credentials,
     hold_ipp_paths,
     hold_payload,
     hold_queue_name,
+    hold_target,
     interpret_hold_report,
     ipp_confirmed,
     job_label,
+    private_ipv4,
     send_lpr,
     send_smb,
     smb_hold_unc,
@@ -342,9 +345,11 @@ def test_print_and_direct_queues_are_refused_before_any_connection():
         else:
             raise AssertionError(queue)
     assert hold_ipp_paths() == ("/ipp/hold", "/hold")
-    assert smb_hold_unc("192.168.0.200", "card_PRINT_READY.pdf") == "\\\\192.168.0.200\\hold\\card_PRINT_READY.pdf"
+    assert smb_hold_unc(
+        "192.168.0.200", "card_PRINT_READY.pdf", allowed=["192.168.0.200"]
+    ) == "\\\\192.168.0.200\\hold\\card_PRINT_READY.pdf"
     try:
-        smb_hold_unc("192.168.0.200", "card_PRINT_READY.pdf", queue="direct")
+        smb_hold_unc("192.168.0.200", "card_PRINT_READY.pdf", queue="direct", allowed=["192.168.0.200"])
     except RuntimeError as error:
         assert "Refusing to print" in str(error)
     else:
@@ -436,7 +441,9 @@ def test_ipp_and_smb_stay_on_hold_and_api_waits_for_a_pinned_login():
         seen["path"] = path
         seen["data"] = data
 
-    saved = send_smb("192.168.0.200", b"%PDF-smb", "card_PRINT_READY.pdf", 3, copy=copy)
+    saved = send_smb(
+        "192.168.0.200", b"%PDF-smb", "card_PRINT_READY.pdf", 3, copy=copy, allowed=["192.168.0.200"]
+    )
     assert saved["method"] == "smb" and saved["printed"] is False
     assert seen == {"path": "\\\\192.168.0.200\\hold\\card_PRINT_READY.pdf", "data": b"%PDF-smb"}
 
@@ -483,6 +490,158 @@ def test_ipp_and_smb_stay_on_hold_and_api_waits_for_a_pinned_login():
         raise AssertionError("pin")
 
 
+def _shop_fiery(address="192.168.0.200", name="Xerox EX-Li PX300 Server 1.0 US(6B:72:F0)"):
+    return {"name": name, "address": address, "isFiery": True}
+
+
+def test_hold_uses_only_a_discovered_private_fiery():
+    printers = [
+        _shop_fiery(),
+        {"name": "Color Printer", "address": "192.168.0.200", "isFiery": True},
+        {"name": "Roland DG BY-20", "address": "192.168.0.3", "isFiery": False},
+    ]
+    assert discovered_fiery_ips(printers) == ["192.168.0.200"]
+    assert private_ipv4("10.1.2.3") == "10.1.2.3"
+    assert private_ipv4("10.255.255.255") == "10.255.255.255"
+    assert private_ipv4("172.16.0.1") == "172.16.0.1"
+    assert private_ipv4("172.31.255.254") == "172.31.255.254"
+    assert private_ipv4("192.168.0.200") == "192.168.0.200"
+    for refused in (
+        "8.8.8.8", "172.32.0.1", "172.15.5.5", "192.168.000.200", "127.0.0.1",
+        "169.254.1.1", "fiery.local", "192.168.0.200.1", "", "0.0.0.0",
+    ):
+        assert private_ipv4(refused) is None
+    assert discovered_fiery_ips([{"isFiery": True, "address": "8.8.8.8"}]) == []
+    assert hold_target("", printers) == "192.168.0.200"
+    assert hold_target("192.168.0.200", printers) == "192.168.0.200"
+    assert hold_target(r"\\192.168.0.200\hold", printers) == "192.168.0.200"
+    assert hold_target("//192.168.0.200/hold", printers) == "192.168.0.200"
+
+    calls = []
+
+    def transport(*_args, **_kwargs):
+        calls.append("network")
+        raise AssertionError("network")
+
+    for supplied in (
+        "8.8.8.8",
+        "evil.example",
+        r"\\8.8.8.8\share",
+        r"\\192.168.0.200\print",
+        r"\\192.168.0.200\hold\extra",
+        r"\\192.168.0.200\hold\card.pdf",
+        "172.32.0.1",
+        "192.168.000.200",
+        "10.1.2.3",
+        "192.168.0.3",
+    ):
+        outcome = submit_hold(
+            supplied,
+            "card_PRINT_READY.pdf",
+            "London BC",
+            "Matte",
+            b"%PDF",
+            printers=printers,
+            lpr=transport,
+            ipp=transport,
+            smb=transport,
+            api=transport,
+            hot_folder=r"\\attacker\share",
+        )
+        assert outcome["ok"] is False and outcome["held"] is False and outcome["printed"] is False
+        assert "Nothing was printed" in outcome["error"]
+        assert "did not discover" in outcome["error"]
+    assert calls == []
+    try:
+        hold_target("", [{"isFiery": True, "address": "8.8.8.8"}])
+    except RuntimeError as error:
+        assert "No Fiery was found" in str(error)
+    else:
+        raise AssertionError("public fiery")
+    two = [_shop_fiery("10.0.0.8", "EX-Li"), _shop_fiery("10.1.0.8", "EX-P")]
+    try:
+        hold_target("", two)
+    except RuntimeError as error:
+        assert "did not discover" in str(error)
+    else:
+        raise AssertionError("two fieries")
+
+    for bad_unc in (
+        r"\\192.168.0.200\hold",
+        r"\\192.168.0.200\print",
+        r"\\8.8.8.8\share",
+        r"\\192.168.0.200\hold\extra",
+        "8.8.8.8",
+        "fiery.local",
+    ):
+        try:
+            smb_hold_unc(bad_unc, "card_PRINT_READY.pdf", allowed=["192.168.0.200"])
+        except RuntimeError as error:
+            assert "Nothing was printed" in str(error)
+        else:
+            raise AssertionError(bad_unc)
+    try:
+        send_smb("192.168.0.200", b"%PDF", "card_PRINT_READY.pdf", 3, copy=transport)
+    except RuntimeError as error:
+        assert "did not discover" in str(error)
+    else:
+        raise AssertionError("smb without allow list")
+    assert calls == []
+
+    folder = ROOT / "backend" / "tests" / "_hold_tmp"
+    folder.mkdir(exist_ok=True)
+    try:
+        ignored = submit_hold(
+            "192.168.0.200",
+            "card_PRINT_READY.pdf",
+            "London BC",
+            "Matte",
+            b"%PDF-hold",
+            lpr=_down,
+            ipp=_down,
+            smb=_down,
+            hot_folder=str(folder),
+        )
+        assert ignored["ok"] is False
+        assert ignored["held"] is False
+        assert not (folder / "Hold").exists()
+        local = submit_hold(
+            "192.168.0.200",
+            "card_PRINT_READY.pdf",
+            "London BC",
+            "Matte",
+            b"%PDF-hold",
+            lpr=_down,
+            ipp=_down,
+            smb=_down,
+            operator_folder=str(folder),
+        )
+        assert local == {"ok": True, "held": True, "printed": False, "method": "hot-folder", "error": ""}
+        assert (folder / "Hold" / "card_PRINT_READY.pdf").read_bytes() == b"%PDF-hold"
+        remote = submit_hold(
+            "192.168.0.200",
+            "card_PRINT_READY.pdf",
+            "London BC",
+            "Matte",
+            b"%PDF-hold",
+            lpr=_down,
+            ipp=_down,
+            smb=_down,
+            operator_folder=r"\\192.168.0.200\hold",
+        )
+        assert remote["ok"] is False
+        assert "folder on this computer" in remote["error"]
+    finally:
+        target = folder / "Hold" / "card_PRINT_READY.pdf"
+        if target.exists():
+            target.unlink()
+        hold_dir = folder / "Hold"
+        if hold_dir.exists():
+            hold_dir.rmdir()
+        if folder.exists():
+            folder.rmdir()
+
+
 def test_unconfirmed_hold_is_not_delivered_and_a_folder_still_requires_the_bytes():
     assert interpret_hold_report({"ok": True, "held": True, "printed": True})["ok"] is False
     assert interpret_hold_report({"ok": True, "held": True, "method": "lpr"})["method"] == "lpr"
@@ -493,6 +652,19 @@ def test_unconfirmed_hold_is_not_delivered_and_a_folder_still_requires_the_bytes
     folder = ROOT / "backend" / "tests" / "_hold_tmp"
     folder.mkdir(exist_ok=True)
     try:
+        refused = submit_hold(
+            "192.168.0.200",
+            "card_PRINT_READY.pdf",
+            "London BC",
+            "Matte",
+            b"%PDF-server",
+            lpr=_down,
+            ipp=_down,
+            smb=_down,
+            hot_folder=str(folder),
+        )
+        assert refused["ok"] is False and refused["held"] is False
+        assert not (folder / "Hold").exists()
         saved = submit_hold(
             "192.168.0.200",
             "card_PRINT_READY.pdf",
@@ -502,7 +674,7 @@ def test_unconfirmed_hold_is_not_delivered_and_a_folder_still_requires_the_bytes
             lpr=_down,
             ipp=_down,
             smb=_down,
-            hot_folder=str(folder),
+            operator_folder=str(folder),
         )
         assert saved == {"ok": True, "held": True, "printed": False, "method": "hot-folder", "error": ""}
         assert (folder / "Hold" / "card_PRINT_READY.pdf").read_bytes() == b"%PDF-hold"
@@ -523,6 +695,13 @@ def test_unconfirmed_hold_is_not_delivered_and_a_folder_still_requires_the_bytes
     pairing = (ROOT / "backend" / "p2g" / "connector_pairing.py").read_text(encoding="utf-8")
     assert '"jobName": job_label(' in pairing
     assert "hold_method_label" in pairing
+    assert "hotFolder" not in pairing
+    connector = (ROOT / "frontend" / "public" / "setup" / "myraana-connector.py").read_text(encoding="utf-8")
+    holds = connector.split("def perform_holds", 1)[1].split("\nRUN_KEY", 1)[0]
+    assert "hotFolder" not in holds
+    assert "hot_folder=" not in holds
+    assert "printers=printers" in holds
+    assert "hold_target" in holds
     ui = (ROOT / "frontend" / "src" / "App.js").read_text(encoding="utf-8")
     assert 'data-testid="fiery-hold-error"' in ui
 

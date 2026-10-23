@@ -53,6 +53,87 @@ def host_only(address):
     return text.strip()
 
 
+def private_ipv4(address):
+    """RFC1918 IPv4, written without leading zeros. Hostnames and public IPs are refused."""
+    host = host_only(address)
+    if not host or any(char in host for char in "\\/ \t"):
+        return None
+    parts = host.split(".")
+    if len(parts) != 4:
+        return None
+    numbers = []
+    for part in parts:
+        if not part.isdigit() or part != str(int(part)) or int(part) > 255:
+            return None
+        numbers.append(int(part))
+    first, second = numbers[0], numbers[1]
+    if first == 10 or (first == 172 and 16 <= second <= 31) or (first == 192 and second == 168):
+        return ".".join(str(number) for number in numbers)
+    return None
+
+
+def discovered_fiery_ips(printers):
+    """Private addresses of Fiery printers this computer found. A public address is ignored."""
+    allowed = []
+    for item in printers or []:
+        if not isinstance(item, dict) or not item.get("isFiery"):
+            continue
+        ip = private_ipv4(item.get("address") or "")
+        if ip and ip not in allowed:
+            allowed.append(ip)
+    return allowed
+
+
+def _unc_parts(text):
+    raw = str(text or "").strip().replace("/", "\\")
+    if not raw.startswith("\\\\"):
+        return None
+    pieces = raw[2:].split("\\")
+    while pieces and pieces[-1] == "":
+        pieces.pop()
+    if not pieces or any(part == "" for part in pieces):
+        return None
+    return pieces
+
+
+def hold_target(supplied, printers):
+    """The only address a HOLD job may use: one private Fiery this computer discovered.
+
+    A UNC path is accepted only as \\\\discovered-ip\\hold. Any other share, extra
+    path, hostname, or public address is refused before a connection is opened.
+    """
+    allowed = discovered_fiery_ips(printers)
+    if not allowed:
+        raise RuntimeError("No Fiery was found on this computer. Nothing was printed.")
+    text = str(supplied or "").strip()
+    if not text:
+        if len(allowed) == 1:
+            return allowed[0]
+        raise RuntimeError("This computer did not discover that Fiery. Nothing was printed.")
+    pieces = _unc_parts(text)
+    if pieces is not None:
+        if len(pieces) != 2 or pieces[1].lower() != "hold":
+            raise RuntimeError("This computer did not discover that Fiery. Nothing was printed.")
+        ip = private_ipv4(pieces[0])
+    elif text.startswith("\\") or text.startswith("//"):
+        raise RuntimeError("This computer did not discover that Fiery. Nothing was printed.")
+    else:
+        ip = private_ipv4(text)
+    if not ip or ip not in allowed:
+        raise RuntimeError("This computer did not discover that Fiery. Nothing was printed.")
+    return ip
+
+
+def _operator_hold_folder(folder):
+    """A drop folder the operator chose on this computer. A UNC path is refused."""
+    text = str(folder or "").strip()
+    if not text:
+        return None
+    if text.startswith("\\\\") or text.startswith("//") or text.startswith("\\") or "://" in text:
+        raise RuntimeError("The Hold folder must be a folder on this computer. Nothing was printed.")
+    return text
+
+
 def pdf_filename(filename):
     name = Path(str(filename or "")).name
     if not name or name in {".", ".."} or any(char in name for char in "\\/\x00\r\n"):
@@ -156,16 +237,24 @@ def submit_hold(
     ipp=None,
     smb=None,
     api=None,
+    printers=None,
+    operator_folder=None,
 ):
     """Put the PDF on the Fiery Hold queue. A transport must confirm before this returns held.
 
-    opener is ignored. The API is used only when credentials contains an API key,
-    user, and password, and only after the Hold queue transports fail.
+    opener is ignored. hot_folder is ignored: a path supplied by the server is never
+    written. operator_folder is used only when this computer passes a local folder.
+    When printers is set, the address must be a private Fiery in that list.
+    The API is used only when credentials contains an API key, user, and password,
+    and only after the Hold queue transports fail.
     """
     del opener
+    del hot_folder
     try:
         queue = hold_queue_name(queue)
         payload = hold_payload(filename, preset, stock, job_label(job_name, job_id, filename))
+        if printers is not None:
+            address = hold_target(address, printers)
     except RuntimeError as error:
         return _failed("", str(error))
     pdf = pdf or b""
@@ -198,12 +287,18 @@ def submit_hold(
     held = attempt("ipp", lambda: ipp_fn(address, pdf, label, payload["filename"], timeout, queue))
     if held:
         return held
-    smb_fn = smb or send_smb
-    held = attempt("smb", lambda: smb_fn(address, pdf, payload["filename"], timeout, queue))
+    allowed = discovered_fiery_ips(printers) if printers is not None else None
+
+    def run_smb():
+        if smb is not None:
+            return smb(address, pdf, payload["filename"], timeout, queue)
+        return send_smb(address, pdf, payload["filename"], timeout, queue, allowed=allowed)
+
+    held = attempt("smb", run_smb)
     if held:
         return held
-    if hot_folder:
-        held = attempt("hot-folder", lambda: _commit_hot_folder(hot_folder, payload["filename"], pdf))
+    if operator_folder:
+        held = attempt("hot-folder", lambda: _commit_hot_folder(operator_folder, payload["filename"], pdf))
         if held:
             return held
     creds = fiery_credentials(credentials)
@@ -344,22 +439,33 @@ def _ipp_post(host, port, path, body, timeout):
         connection.close()
 
 
-def smb_hold_unc(address, filename, queue="hold"):
+def smb_hold_unc(address, filename, queue="hold", allowed=None):
+    """Build \\\\discovered-ip\\hold\\file. An arbitrary UNC path is never returned."""
     hold_queue_name(queue)
-    host = host_only(address)
-    if not host or any(char in host for char in "\\/"):
-        raise RuntimeError("Fiery address is invalid.")
-    path = f"\\\\{host}\\hold\\{pdf_filename(filename)}"
+    text = str(address or "").strip()
+    if text.startswith("\\\\") or text.startswith("//") or text.startswith("\\"):
+        raise RuntimeError("Refusing an SMB path that was not built from a discovered Fiery. Nothing was printed.")
+    ip = private_ipv4(text)
+    if not ip:
+        raise RuntimeError("Refusing a Fiery address that is not a private network address. Nothing was printed.")
+    allow = []
+    for item in allowed or []:
+        candidate = private_ipv4(item.get("address") if isinstance(item, dict) else item)
+        if candidate and candidate not in allow:
+            allow.append(candidate)
+    if ip not in allow:
+        raise RuntimeError("This computer did not discover that Fiery. Nothing was printed.")
+    path = f"\\\\{ip}\\hold\\{pdf_filename(filename)}"
     lowered = path.lower()
-    if "\\hold\\" not in lowered or "\\print\\" in lowered or "\\direct\\" in lowered:
+    if not lowered.startswith(f"\\\\{ip}\\hold\\") or "\\print\\" in lowered or "\\direct\\" in lowered:
         raise RuntimeError("Refusing to print. Only the hold queue is allowed.")
     return path
 
 
-def send_smb(address, pdf, filename, timeout, queue="hold", copy=None):
-    """Copy onto \\\\address\\hold. Used on the shop Windows computer."""
+def send_smb(address, pdf, filename, timeout, queue="hold", copy=None, allowed=None):
+    """Copy onto \\\\discovered-ip\\hold. Used on the shop Windows computer."""
     del timeout
-    path = smb_hold_unc(address, filename, queue)
+    path = smb_hold_unc(address, filename, queue, allowed=allowed)
     writer = copy or _copy_unc
     if copy is None and os.name != "nt":
         raise RuntimeError("SMB Hold copy is only used on the shop Windows computer.")
@@ -377,7 +483,10 @@ def _copy_unc(path, pdf):
 
 
 def _commit_hot_folder(folder, filename, pdf):
-    _write_hold_folder(folder, filename, pdf)
+    local = _operator_hold_folder(folder)
+    if not local:
+        raise RuntimeError("The Hold folder must be a folder on this computer. Nothing was printed.")
+    _write_hold_folder(local, filename, pdf)
     return _confirmed("hot-folder")
 
 
@@ -529,6 +638,9 @@ def interpret_hold_report(report):
 
 
 def _write_hold_folder(folder, filename, pdf):
+    folder = _operator_hold_folder(folder)
+    if not folder:
+        raise RuntimeError("The Hold folder must be a folder on this computer. Nothing was printed.")
     root = Path(folder).resolve()
     hold = root / "Hold"
     hold.mkdir(parents=True, exist_ok=True)
