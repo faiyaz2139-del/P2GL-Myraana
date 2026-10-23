@@ -7,6 +7,8 @@ SMB paths and hot folders are not part of this file.
 """
 import hashlib
 import os
+import tempfile
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
@@ -19,6 +21,21 @@ ENROLL_WINDOW = timedelta(minutes=10)
 PUBLIC_ENROLL_ERROR = "This setup link is invalid or expired."
 SETUP_PREFIX = "MyraanaConnector-Setup-"
 SETUP_FILENAME = "MyraanaConnector-Setup.exe"
+PREVIEW_EXE_URL = (
+    "https://github.com/faiyaz2139-del/P2GL-Myraana/releases/download/"
+    "windows-connector-preview/MyraanaConnector.exe"
+)
+PREVIEW_SHA_URL = (
+    "https://github.com/faiyaz2139-del/P2GL-Myraana/releases/download/"
+    "windows-connector-preview/MyraanaConnector.exe.sha256"
+)
+PREVIEW_REFRESH = timedelta(hours=1)
+
+
+class PackageUnavailable(Exception):
+    def __init__(self, message):
+        super().__init__(message)
+        self.message = message
 
 
 def https_website(value):
@@ -204,6 +221,148 @@ def published_connector_update(env=None):
         return None
     version = str(env.get("CONNECTOR_UPDATE_VERSION") or digest[:12]).strip()[:80]
     return {"url": url, "sha256": digest, "version": version}
+
+
+def parse_sha256_asset(text):
+    """A checksum file is either a bare hash or 'hash  filename'."""
+    if isinstance(text, (bytes, bytearray)):
+        text = bytes(text).decode("utf-8", "replace")
+    for token in str(text or "").replace(",", " ").split():
+        digest = _sha256_hex(token)
+        if digest:
+            return digest
+    return ""
+
+
+def connector_cache_dir(env=None):
+    env = os.environ if env is None else env
+    configured = str(env.get("CONNECTOR_PACKAGE_CACHE") or "").strip()
+    if configured:
+        return configured
+    return os.path.join(tempfile.gettempdir(), "myraana-connector-preview")
+
+
+def fetch_https(url, timeout=120):
+    """Download one HTTPS URL. A redirect that leaves HTTPS is refused."""
+    cleaned = https_download_url(url)
+    if not cleaned:
+        raise PackageUnavailable("The connector setup file could not be downloaded.")
+    request = urllib.request.Request(cleaned, headers={"User-Agent": "Myraana"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            final = str(response.geturl() or "")
+            if urlsplit(final).scheme != "https":
+                raise PackageUnavailable("The connector setup file could not be downloaded.")
+            return response.read()
+    except PackageUnavailable:
+        raise
+    except Exception as error:
+        raise PackageUnavailable("The connector setup file could not be downloaded.") from error
+
+
+def _cache_paths(cache_dir):
+    exe_path = os.path.join(cache_dir, "MyraanaConnector.exe")
+    return exe_path, exe_path + ".sha256", exe_path + ".checked"
+
+
+def _read_verified_cache(cache_dir):
+    exe_path, sha_path, checked_path = _cache_paths(cache_dir)
+    try:
+        with open(exe_path, "rb") as handle:
+            payload = handle.read()
+        with open(sha_path, encoding="ascii") as handle:
+            digest = parse_sha256_asset(handle.read())
+        with open(checked_path, encoding="ascii") as handle:
+            checked = handle.read().strip()
+    except OSError:
+        return b"", "", ""
+    if not payload or not verify_sha256(payload, digest):
+        return b"", "", ""
+    return payload, digest, checked
+
+
+def _write_verified_cache(cache_dir, payload, digest, checked_at):
+    os.makedirs(cache_dir, exist_ok=True)
+    exe_path, sha_path, checked_path = _cache_paths(cache_dir)
+    temporary = exe_path + ".part"
+    with open(temporary, "wb") as handle:
+        handle.write(payload)
+    os.replace(temporary, exe_path)
+    with open(sha_path, "w", encoding="ascii") as handle:
+        handle.write(digest + "\n")
+    with open(checked_path, "w", encoding="ascii") as handle:
+        handle.write(str(checked_at) + "\n")
+
+
+def _cache_is_fresh(checked, now, max_age):
+    moment = _moment(checked)
+    current = _moment(now) or datetime.now(timezone.utc)
+    if moment is None:
+        return False
+    return current - moment < max_age
+
+
+def published_connector_package(
+    cache_dir,
+    fetcher,
+    now,
+    exe_url=PREVIEW_EXE_URL,
+    sha_url=PREVIEW_SHA_URL,
+    max_age=PREVIEW_REFRESH,
+):
+    """The preview exe, checked against the published SHA-256.
+
+    A fresh cache is served as-is. After an hour the published hash is read
+    again. A new hash downloads a new exe. A mismatch is not cached.
+    """
+    cached, cached_digest, checked = _read_verified_cache(cache_dir)
+    if cached and _cache_is_fresh(checked, now, max_age):
+        return cached
+    checked_at = (_moment(now) or datetime.now(timezone.utc)).isoformat()
+    try:
+        published = parse_sha256_asset(fetcher(sha_url))
+    except Exception:
+        if cached:
+            return cached
+        raise PackageUnavailable("The connector setup file could not be downloaded.")
+    if not published:
+        if cached:
+            return cached
+        raise PackageUnavailable("The connector setup file could not be downloaded.")
+    if cached and published == cached_digest:
+        _write_verified_cache(cache_dir, cached, cached_digest, checked_at)
+        return cached
+    try:
+        payload = fetcher(exe_url)
+    except PackageUnavailable:
+        raise
+    except Exception as error:
+        raise PackageUnavailable("The connector setup file could not be downloaded.") from error
+    if not isinstance(payload, (bytes, bytearray)):
+        payload = b""
+    payload = bytes(payload)
+    if not verify_sha256(payload, published):
+        raise PackageUnavailable("The published connector did not match its checksum.")
+    _write_verified_cache(cache_dir, payload, published, checked_at)
+    return payload
+
+
+def local_connector_package(path):
+    if not path or not os.path.isfile(path):
+        raise PackageUnavailable("The connector setup file is not on this server yet.")
+    with open(path, "rb") as handle:
+        payload = handle.read()
+    if not payload:
+        raise PackageUnavailable("The connector setup file is not on this server yet.")
+    return payload
+
+
+def connector_package_bytes(env, cache_dir, fetcher, now):
+    """A configured file wins. Otherwise use the published preview exe."""
+    path = str((env or {}).get("CONNECTOR_PACKAGE_PATH") or "").strip()
+    if path:
+        return local_connector_package(path)
+    return published_connector_package(cache_dir, fetcher, now)
 
 
 def verify_sha256(payload, expected):

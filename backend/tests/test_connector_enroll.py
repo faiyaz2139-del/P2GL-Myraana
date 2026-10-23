@@ -1,20 +1,27 @@
 """Setup download: one exe, token only in the filename, hashed on the server."""
 import hashlib
-from datetime import timedelta
+import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from p2g.connector_auth import credential_hash
 from p2g.connector_enroll import (
     ENROLL_MINUTES,
+    PREVIEW_EXE_URL,
+    PREVIEW_SHA_URL,
     PUBLIC_ENROLL_ERROR,
     SETUP_PREFIX,
+    PackageUnavailable,
     build_enrollment,
     choose_device,
+    connector_package_bytes,
     enrollment_download,
     enrollment_expiry,
     enrollment_rate_limited,
     enrollment_state,
+    fetch_https,
     public_enrollment,
+    published_connector_package,
     published_connector_update,
     setup_filename,
     setup_token_from_filename,
@@ -128,3 +135,148 @@ def test_site_asks_for_one_setup_file_and_keeps_the_hold_rules():
     assert "hotFolder" not in connector.split("def perform_holds", 1)[1].split("\nRUN_KEY", 1)[0]
     mirror = (ROOT / "artifacts" / "myraana-windows-connector" / "myraana-connector.py").read_bytes()
     assert mirror == (ROOT / "frontend" / "public" / "setup" / "myraana-connector.py").read_bytes()
+    assert "connector_package_bytes" in pairing
+    assert "PackageUnavailable" in pairing
+
+
+def _expect_unavailable(action, message):
+    try:
+        action()
+    except PackageUnavailable as error:
+        assert error.message == message
+        return
+    raise AssertionError(message)
+
+
+def test_unset_path_fetches_the_published_exe_and_checks_its_hash():
+    """No CONNECTOR_PACKAGE_PATH: download the preview, trust only a matching SHA-256."""
+    assert PREVIEW_EXE_URL == (
+        "https://github.com/faiyaz2139-del/P2GL-Myraana/releases/download/"
+        "windows-connector-preview/MyraanaConnector.exe"
+    )
+    assert PREVIEW_SHA_URL == (
+        "https://github.com/faiyaz2139-del/P2GL-Myraana/releases/download/"
+        "windows-connector-preview/MyraanaConnector.exe.sha256"
+    )
+    workflow = (ROOT / ".github" / "workflows" / "build-windows-connector.yml").read_text(encoding="utf-8")
+    assert "MyraanaConnector.exe.sha256" in workflow
+    assert 'github.ref == \'refs/heads/main\'' in workflow
+    assert "gh release upload windows-connector-preview $package $checksum $exe $exeChecksum --clobber" in workflow
+
+    class Preview:
+        def __init__(self):
+            self.calls = []
+            self.exe = b"MZ-preview-onefile"
+            self.mode = "ok"
+
+        def __call__(self, url):
+            self.calls.append(url)
+            if self.mode == "boom":
+                raise OSError("offline")
+            if url == PREVIEW_SHA_URL:
+                if self.mode == "garbage":
+                    return b"not-a-hash"
+                if self.mode == "mismatch":
+                    return hashlib.sha256(b"other-file").hexdigest().upper()
+                return f"{hashlib.sha256(self.exe).hexdigest().upper()}  MyraanaConnector.exe\n".encode()
+            if url == PREVIEW_EXE_URL:
+                if self.mode == "mismatch":
+                    return b"tampered-bytes"
+                return self.exe
+            raise AssertionError(url)
+
+    preview = Preview()
+    start = datetime(2026, 10, 23, 0, 0, tzinfo=timezone.utc)
+    with tempfile.TemporaryDirectory() as cache:
+        body = connector_package_bytes(
+            {"CONNECTOR_PACKAGE_PATH": "   "}, cache, preview, start,
+        )
+        assert body == preview.exe
+        assert preview.calls == [PREVIEW_SHA_URL, PREVIEW_EXE_URL]
+        served, filename = enrollment_download(body, TOKEN)
+        assert served == preview.exe
+        assert filename == f"{SETUP_PREFIX}{TOKEN}.exe"
+        assert TOKEN.encode() not in served
+
+        preview.calls.clear()
+        again = published_connector_package(cache, preview, start + timedelta(minutes=30))
+        assert again == preview.exe
+        assert preview.calls == []
+
+        hour_later = published_connector_package(cache, preview, start + timedelta(hours=1))
+        assert hour_later == preview.exe
+        assert preview.calls == [PREVIEW_SHA_URL]
+
+        preview.calls.clear()
+        preview.exe = b"MZ-preview-onefile-v2"
+        updated = published_connector_package(cache, preview, start + timedelta(hours=2))
+        assert updated == b"MZ-preview-onefile-v2"
+        assert preview.calls == [PREVIEW_SHA_URL, PREVIEW_EXE_URL]
+        assert (Path(cache) / "MyraanaConnector.exe").read_bytes() == updated
+
+        preview.calls.clear()
+        preview.mode = "mismatch"
+        _expect_unavailable(
+            lambda: published_connector_package(cache, preview, start + timedelta(hours=3)),
+            "The published connector did not match its checksum.",
+        )
+        assert (Path(cache) / "MyraanaConnector.exe").read_bytes() == updated
+        assert not (Path(cache) / "MyraanaConnector.exe.part").exists()
+
+        preview.calls.clear()
+        preview.mode = "boom"
+        assert published_connector_package(cache, preview, start + timedelta(hours=4)) == updated
+
+        preview.mode = "garbage"
+        assert published_connector_package(cache, preview, start + timedelta(hours=5)) == updated
+
+    with tempfile.TemporaryDirectory() as empty:
+        preview.calls.clear()
+        preview.mode = "boom"
+        _expect_unavailable(
+            lambda: published_connector_package(empty, preview, start),
+            "The connector setup file could not be downloaded.",
+        )
+        assert not (Path(empty) / "MyraanaConnector.exe").exists()
+        preview.mode = "garbage"
+        _expect_unavailable(
+            lambda: published_connector_package(empty, preview, start),
+            "The connector setup file could not be downloaded.",
+        )
+        assert preview.calls
+        assert PREVIEW_EXE_URL not in preview.calls
+
+    with tempfile.TemporaryDirectory() as folder:
+        local = Path(folder) / "local.exe"
+        local.write_bytes(b"local-package")
+        preview.calls.clear()
+        served = connector_package_bytes(
+            {"CONNECTOR_PACKAGE_PATH": str(local)}, folder, preview, start,
+        )
+        assert served == b"local-package"
+        assert preview.calls == []
+        missing = str(Path(folder) / "missing.exe")
+        _expect_unavailable(
+            lambda: connector_package_bytes(
+                {"CONNECTOR_PACKAGE_PATH": missing}, folder, preview, start,
+            ),
+            "The connector setup file is not on this server yet.",
+        )
+        empty = Path(folder) / "empty.exe"
+        empty.write_bytes(b"")
+        _expect_unavailable(
+            lambda: connector_package_bytes(
+                {"CONNECTOR_PACKAGE_PATH": str(empty)}, folder, preview, start,
+            ),
+            "The connector setup file is not on this server yet.",
+        )
+        assert preview.calls == []
+
+    _expect_unavailable(
+        lambda: fetch_https("http://github.com/faiyaz2139-del/P2GL-Myraana/releases/download/x"),
+        "The connector setup file could not be downloaded.",
+    )
+    _expect_unavailable(
+        lambda: fetch_https("https://user:pass@github.com/faiyaz2139-del/P2GL-Myraana/x.exe"),
+        "The connector setup file could not be downloaded.",
+    )

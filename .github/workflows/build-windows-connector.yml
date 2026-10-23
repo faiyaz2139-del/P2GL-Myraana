@@ -95,17 +95,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          $exe = Join-Path $env:CONNECTOR_DIR "dist\MyraanaConnector.exe"
+          if (-not (Test-Path $exe)) { throw "Connector executable missing" }
           $package = Join-Path $env:RUNNER_TEMP "MyraanaConnector.zip"
-          Compress-Archive -Path "$env:CONNECTOR_DIR/dist/MyraanaConnector.exe" -DestinationPath $package -Force
+          Compress-Archive -Path $exe -DestinationPath $package -Force
           $hash = (Get-FileHash $package -Algorithm SHA256).Hash.ToLower()
           $checksum = Join-Path $env:RUNNER_TEMP "MyraanaConnector.sha256"
           "$hash  MyraanaConnector.zip" | Set-Content -Path $checksum -Encoding ascii
+          $exeHash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          $exeChecksum = Join-Path $env:RUNNER_TEMP "MyraanaConnector.exe.sha256"
+          "$exeHash  MyraanaConnector.exe" | Set-Content -Path $exeChecksum -Encoding ascii
           $notes = Join-Path $env:RUNNER_TEMP "connector-release-notes.md"
           @"
           Unsigned Windows connector. On myraana.com, Connect this computer downloads one setup exe. Open that file.
           It installs itself, pairs, and keeps running in the system tray. It can start with Windows. Opening it again reconnects with no code.
           This connector finds your printers and can place approved PRINT_READY files on your Fiery HOLD queue. It never prints or releases jobs.
           Source commit: $env:GITHUB_SHA
+          EXE SHA-256: $exeHash
           ZIP SHA-256: $hash
           Real shop hardware acceptance remains required.
           "@ | Set-Content -Path $notes -Encoding utf8
@@ -114,7 +120,7 @@ jobs:
             gh release create windows-connector-preview --target $env:GITHUB_SHA --title "Myraana Windows Connector" --prerelease --latest=false --notes-file $notes
             if ($LASTEXITCODE -ne 0) { throw "Preview release creation failed" }
           }
-          gh release upload windows-connector-preview $package $checksum --clobber
+          gh release upload windows-connector-preview $package $checksum $exe $exeChecksum --clobber
           if ($LASTEXITCODE -ne 0) { throw "Preview package upload failed" }
           gh release edit windows-connector-preview --notes-file $notes
           if ($LASTEXITCODE -ne 0) { throw "Preview release notes update failed" }

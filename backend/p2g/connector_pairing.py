@@ -35,12 +35,16 @@ from p2g.connector_auth import (
 from p2g.connector_enroll import (
     ENROLL_WINDOW,
     PUBLIC_ENROLL_ERROR,
+    PackageUnavailable,
     build_enrollment,
     choose_device,
+    connector_cache_dir,
+    connector_package_bytes,
     enrollment_download,
     enrollment_rate_limited,
     enrollment_state,
     enrollment_website,
+    fetch_https,
     public_enrollment,
     published_connector_update,
 )
@@ -351,11 +355,16 @@ async def hold_pdf(request, job_id):
 
 
 def _base_package():
-    path = os.environ.get("CONNECTOR_PACKAGE_PATH", "").strip()
-    if path and os.path.isfile(path):
-        with open(path, "rb") as handle:
-            return handle.read()
-    return b""
+    """A local file when CONNECTOR_PACKAGE_PATH is set. Otherwise the published preview exe."""
+    try:
+        return connector_package_bytes(
+            os.environ,
+            connector_cache_dir(),
+            fetch_https,
+            datetime.now(timezone.utc),
+        )
+    except PackageUnavailable as error:
+        raise AppError(error.message, 503) from error
 
 
 async def create_enrollment_package(user, website_candidates):
