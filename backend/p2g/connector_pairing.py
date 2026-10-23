@@ -4,7 +4,22 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 from p2g.account_access import exclude_archived
-from p2g.card_flow import AUTO_ACTOR, hold_failure_message, record_successful_hold
+from p2g.automatic import (
+    apply_customer_approval,
+    automatic_mode,
+    automatic_route_note,
+    build_proof_link,
+    proof_link_state,
+)
+from p2g.card_flow import (
+    AUTO_ACTOR,
+    fiery_target,
+    hold_failure_message,
+    keep_production_route,
+    record_successful_hold,
+    route_for_print_order,
+    stage_fiery_hold,
+)
 from p2g.connector_auth import (
     build_pairing_document,
     connector_presence,
@@ -14,14 +29,27 @@ from p2g.connector_auth import (
     manual_approval_required,
     hold_for_device,
     normalise_capabilities,
+    pairing_shop_id,
     shop_for_connected_pairing,
+)
+from p2g.connector_enroll import (
+    ENROLL_WINDOW,
+    PUBLIC_ENROLL_ERROR,
+    build_enrollment,
+    choose_device,
+    enrollment_download,
+    enrollment_rate_limited,
+    enrollment_state,
+    enrollment_website,
+    public_enrollment,
+    published_connector_update,
 )
 from p2g.core import AppError, db, new_id, now
 from p2g.fiery_hold import hold_method_label, interpret_hold_report, job_label
 from p2g.printer_discovery import normalise_reported, preferred_printer, scan_is_due
 from p2g.printers import filter_printers
 from p2g.tenancy import PRINT2GO_SHOP_ID, bound_shop, current_shop_id, shop_scope, unscoped
-from p2g.workflow import file_bytes, get_job, latest, record_event, save_job, update_task
+from p2g.workflow import file_bytes, get_job, latest, readiness, record_event, save_job, update_task
 
 
 def _valid_id(value):
@@ -300,7 +328,11 @@ async def heartbeat(request, payload):
                 settings = {**settings, **fields}
         await _record_holds(payload.get("holds"), settings)
         holds = await _pending_holds(settings, inventory, device.get("_id"))
-    return {"ok": True, "status": "Connected", "scan": due, "holds": holds}
+    result = {"ok": True, "status": "Connected", "scan": due, "holds": holds}
+    manifest = published_connector_update()
+    if manifest:
+        result["update"] = manifest
+    return result
 
 
 async def hold_pdf(request, job_id):
@@ -316,3 +348,244 @@ async def hold_pdf(request, job_id):
         content = await file_bytes(job, record)
         name = str(record.get("name") or "artwork_PRINT_READY.pdf").replace('"', "").replace("\\", "")
         return content, name
+
+
+def _base_package():
+    path = os.environ.get("CONNECTOR_PACKAGE_PATH", "").strip()
+    if path and os.path.isfile(path):
+        with open(path, "rb") as handle:
+            return handle.read()
+    return b""
+
+
+async def create_enrollment_package(user, website_candidates):
+    """One exe. The token is in the filename and stored only as a hash."""
+    shop_id = pairing_shop_id(user, current_shop_id())
+    if not shop_id:
+        raise AppError("Sign in to your shop.", 401)
+    content = _base_package()
+    if not content:
+        raise AppError("The connector setup file is not on this server yet.", 503)
+    created = now()
+    cutoff = (datetime.now(timezone.utc) - ENROLL_WINDOW).isoformat()
+    website = enrollment_website(website_candidates)
+    with shop_scope(shop_id):
+        recent = await db.connector_enrollments.find({"created_at": {"$gt": cutoff}}, {"created_at": 1}).to_list(20)
+        if enrollment_rate_limited([item.get("created_at") for item in recent], created):
+            raise AppError("Wait a few minutes before downloading the connector again.", 429)
+        token = secrets.token_urlsafe(32)
+        document = build_enrollment(
+            user, token, created, enrollment_id=new_id(), current_shop=shop_id,
+        )
+        if not document:
+            raise AppError("Sign in to your shop.", 401)
+        document["website"] = website
+        await db.connector_enrollments.insert_one(document)
+    return enrollment_download(content, token)
+
+
+async def revoke_enrollment(enrollment_id, user):
+    moment = now()
+    record = await db.connector_enrollments.find_one({"_id": enrollment_id})
+    if not record or enrollment_state(record, moment) != "open":
+        raise AppError("That setup download is no longer open.", 409)
+    audit = list(record.get("audit") or [])
+    audit.append({"at": moment, "action": "revoked", "actor": user.get("id") or ""})
+    result = await db.connector_enrollments.update_one(
+        {"_id": enrollment_id, "status": "open"},
+        {"$set": {"status": "revoked", "revoked_at": moment, "audit": audit[-20:]}},
+    )
+    if not result.modified_count:
+        raise AppError("That setup download is no longer open.", 409)
+    return {"ok": True}
+
+
+async def list_enrollments():
+    moment = now()
+    rows = await db.connector_enrollments.find({}, {"token_hash": 0}).to_list(20)
+    public = [public_enrollment(row, moment) for row in rows]
+    public.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return public
+
+
+async def redeem_enrollment(payload):
+    token = str(payload.get("token") or "").strip()
+    device_id = _valid_id(payload.get("deviceId"))
+    if len(token) < 20 or len(token) > 200:
+        raise AppError(PUBLIC_ENROLL_ERROR, 409)
+    digest = credential_hash(token)
+    with unscoped():
+        record = await db.connector_enrollments.find_one({"token_hash": digest})
+    if not record or not hmac.compare_digest(str(record.get("token_hash") or ""), digest):
+        raise AppError(PUBLIC_ENROLL_ERROR, 409)
+    state = enrollment_state(record, now())
+    if state != "open":
+        raise AppError(PUBLIC_ENROLL_ERROR, 409)
+    shop_id = record.get("shop_id")
+    if not shop_id:
+        raise AppError(PUBLIC_ENROLL_ERROR, 409)
+    raw = payload.get("inventory") if isinstance(payload.get("inventory"), dict) else {
+        "hostname": str(payload.get("hostname") or "")[:120],
+        "printers": [],
+        "fiery_rip": [],
+        "hot_folders": [],
+        "capabilities": ["fiery_hold"],
+    }
+    inventory = _inventory(raw)
+    credential = secrets.token_urlsafe(48)
+    moment = now()
+    with shop_scope(shop_id):
+        audit = list(record.get("audit") or [])
+        audit.append({"at": moment, "action": "enrolled", "actor": device_id})
+        result = await db.connector_enrollments.update_one(
+            {"_id": record["_id"], "status": "open", "used_at": ""},
+            {"$set": {"status": "used", "used_at": moment, "device_id": device_id, "audit": audit[-20:]}},
+        )
+        if not result.modified_count:
+            raise AppError(PUBLIC_ENROLL_ERROR, 409)
+        existing = await db.connector_devices.find({}, {"credential_hash": 0}).to_list(50)
+        target, _mode = choose_device(existing, device_id)
+        await db.connector_devices.update_one(
+            {"_id": target},
+            {"$set": {
+                "credential_hash": credential_hash(credential),
+                "enabled": True,
+                "inventory": inventory,
+                "lastSeen": moment,
+                "status": "Connected",
+            }},
+            upsert=True,
+        )
+    return {"status": "Connected", "credential": credential}
+
+
+async def _settings_for_route():
+    settings = await db.settings.find_one({"kind": "settings"}) or {}
+    printer = fiery_target(settings)
+    if printer and not str(settings.get("printer") or "").strip():
+        await db.settings.update_one({"kind": "settings"}, {"$set": {"printer": printer["name"]}})
+        settings = {**settings, "printer": printer["name"]}
+    return settings
+
+
+async def note_prepared_route(job):
+    """Record the press, imposition, and stock. Approval is still required."""
+    settings = await _settings_for_route()
+    job["route"] = route_for_print_order(job, settings)
+    note = automatic_route_note(job, settings)
+    automatic = dict(job.get("automatic") or {})
+    automatic["routeNote"] = note
+    try:
+        ready = await readiness(job)
+    except AppError as error:
+        automatic["readiness"] = error.message
+        record_event(job, error.message, AUTO_ACTOR)
+    else:
+        automatic.pop("error", None)
+        automatic["readiness"] = "ready"
+        automatic["hostname"] = ready.get("hostname") or ""
+        record_event(job, f"{ready.get('hostname') or 'The shop computer'} is connected. This does not print.", AUTO_ACTOR)
+    job["automatic"] = automatic
+    record_event(job, note, AUTO_ACTOR)
+    return job
+
+
+async def queue_automatic_hold(job, actor):
+    """Authorize this approved file onto Fiery HOLD. A failure does not print."""
+    settings = await _settings_for_route()
+    keep_production_route(job, settings)
+    record_event(job, automatic_route_note(job, settings), AUTO_ACTOR)
+    try:
+        ready = await readiness(job)
+    except AppError as error:
+        message = f"{error.message} Nothing was printed."
+        job.setdefault("automatic", {})["error"] = message
+        record_event(job, message, AUTO_ACTOR)
+        return job
+    if ready.get("delivery") != "fiery_hold":
+        message = "The shop computer cannot place this file on Fiery HOLD. Nothing was printed."
+        job.setdefault("automatic", {})["error"] = message
+        record_event(job, message, AUTO_ACTOR)
+        return job
+    printer = fiery_target(settings) or {"name": (job.get("route") or {}).get("printer") or "", "address": ""}
+    try:
+        stage_fiery_hold(job, ready, printer, actor, latest(job, "PRINT_READY"), now())
+    except ValueError as error:
+        job.setdefault("automatic", {})["error"] = str(error)
+        record_event(job, str(error), AUTO_ACTOR)
+        return job
+    job.setdefault("automatic", {}).pop("error", None)
+    record_event(job, "PRINT_READY is queued on the Fiery HOLD queue. It was not printed.", AUTO_ACTOR)
+    return job
+
+
+async def create_proof_link(job, user, base_url):
+    if not latest(job, "PRINT_READY"):
+        raise AppError("The proof is not ready yet.", 409)
+    shop_id = current_shop_id() or job.get("shop_id")
+    if not shop_id:
+        raise AppError("Sign in to your shop.", 401)
+    token = secrets.token_urlsafe(32)
+    document = build_proof_link(
+        job.get("id"), shop_id, token, (user or {}).get("id"), now(), link_id=new_id(),
+    )
+    if not document:
+        raise AppError("The proof link could not be created.", 409)
+    await db.proof_links.insert_one(document)
+    base = str(base_url or "").rstrip("/")
+    url = f"{base}/proof/{token}" if base else f"/proof/{token}"
+    record_event(job, "Approval link created. Approving does not print the job.", (user or {}).get("name") or AUTO_ACTOR)
+    return {"url": url, "emailed": False}
+
+
+async def proof_for_token(token):
+    digest = credential_hash(str(token or "").strip())
+    with unscoped():
+        record = await db.proof_links.find_one({"token_hash": digest})
+    if not record or not hmac.compare_digest(str(record.get("token_hash") or ""), digest):
+        raise AppError("This approval link is invalid or expired.", 409)
+    if proof_link_state(record, now()) == "expired":
+        raise AppError("This approval link is invalid or expired.", 409)
+    with shop_scope(record["shop_id"]):
+        job = await get_job(record["job_id"])
+    if not job:
+        raise AppError("This approval link is invalid or expired.", 409)
+    proof = latest(job, "PRINT_READY")
+    approved = (job.get("approval") or {}).get("sha") == (proof or {}).get("sha") and bool((proof or {}).get("sha"))
+    return {
+        "customer": job.get("customer") or "",
+        "product": (job.get("spec") or {}).get("productName") or (job.get("recipe") or {}).get("name") or "Print",
+        "status": "approved" if approved else "waiting",
+        "sha": (proof or {}).get("sha") or "",
+        "pages": int(job.get("sides") or 1),
+    }
+
+
+async def approve_proof_token(token, actor="Customer"):
+    digest = credential_hash(str(token or "").strip())
+    with unscoped():
+        record = await db.proof_links.find_one({"token_hash": digest})
+    if not record or not hmac.compare_digest(str(record.get("token_hash") or ""), digest):
+        raise AppError("This approval link is invalid or expired.", 409)
+    state = proof_link_state(record, now())
+    if state == "expired":
+        raise AppError("This approval link is invalid or expired.", 409)
+    with shop_scope(record["shop_id"]):
+        if state == "open":
+            await db.proof_links.update_one(
+                {"_id": record["_id"], "status": "open"},
+                {"$set": {"status": "used", "used_at": now()}},
+            )
+        job = await get_job(record["job_id"])
+        if not job:
+            raise AppError("This approval link is invalid or expired.", 409)
+        proof = latest(job, "PRINT_READY")
+        outcome = apply_customer_approval(job, proof, actor, now())
+        if outcome == "missing":
+            raise AppError("The proof is not ready yet.", 409)
+        if outcome == "approved":
+            record_event(job, "Customer approved this exact PDF. Nothing was printed.", actor)
+        if automatic_mode(await db.settings.find_one({"kind": "settings"}, {"_id": 0})):
+            await queue_automatic_hold(job, actor)
+        await save_job(job)
+    return {"ok": True, "status": "approved"}

@@ -184,8 +184,10 @@ export function JobModal({ catalog, settings, close, created }) {
   const [binding, setBinding] = useState(repeat ? (saved.options?.binding || seeded.binding) : seeded.binding);
   const [hardware, setHardware] = useState(repeat ? (saved.options?.hardware || seeded.hardware) : seeded.hardware);
   const [confirmed, setConfirmed] = useState(false);
+  const [artwork, setArtwork] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const automatic = settings?.automaticMode !== false;
   const preset = presets.find((item) => item.id === productId) || starting;
   const { featured, byCategory, services } = groups(presets);
   const stockOptions = [...new Set([...(preset?.stocks || []), ...(settings?.stocks || [])])];
@@ -276,7 +278,19 @@ export function JobModal({ catalog, settings, close, created }) {
         options: payload.options,
       };
       localStorage.setItem(LOCAL_KEY, JSON.stringify(defaults));
-      created(job, defaults);
+      let opened = job;
+      if (automatic && artwork) {
+        const data = new FormData();
+        data.set("file", artwork);
+        data.set("acknowledged", "true");
+        await api(`jobs/${job.id}/artwork`, { method: "POST", body: data });
+        const fresh = await api(`jobs/${job.id}`);
+        opened = await api(`jobs/${job.id}/action`, {
+          method: "POST",
+          body: JSON.stringify({ action: "run-job", generation: fresh.generation }),
+        });
+      }
+      created(opened, defaults);
     } catch (reason) {
       setError(reason.message);
     } finally {
@@ -383,13 +397,16 @@ export function JobModal({ catalog, settings, close, created }) {
         {hintReady && <p className="tiny">Catalog size starts at {customHint.width_min} × {customHint.height_min} {customHint.unit}. You can change it. The shop limit is 150 inches.</p>}
         {preset?.folds?.length > 1 && fold === "none" && <p className="tiny">Folds offered: {preset.folds.join(", ")}. No fold is selected until you choose one.</p>}
         {!preset?.sizes?.length && !hintReady && kind === "print" && <p className="tiny">This preset has no size. Type the finished width and height for this order.</p>}
+        {automatic && <label>Artwork
+          <input type="file" accept=".pdf,.jpg,.jpeg,.png,.gif,.eps,.ai,.psd" data-testid="job-artwork-input" onChange={(event) => setArtwork(event.target.files?.[0] || null)} />
+        </label>}
         <label className="check-label">
           <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} required data-testid="job-confirm-checkbox" />
           I confirm these order details.
         </label>
         <div className="modal-footer">
           <span><ShieldCheck size={14} />The shop’s artwork rules travel with this job</span>
-          <button className="primary" disabled={busy} data-testid="create-job-button">{busy ? "Saving…" : "Create job"}</button>
+          <button className="primary" disabled={busy} data-testid="create-job-button">{busy ? "Saving…" : (automatic ? "Run job" : "Create job")}</button>
         </div>
       </form>
     </section>

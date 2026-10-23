@@ -77,9 +77,9 @@ jobs:
 
       - name: Smoke-test executable without network or printing
         run: |
-          $exe = Join-Path $env:CONNECTOR_DIR "dist\MyraanaConnector\MyraanaConnector.exe"
+          $exe = Join-Path $env:CONNECTOR_DIR "dist\MyraanaConnector.exe"
           if (-not (Test-Path $exe)) { throw "Connector executable missing" }
-          python -c "import subprocess,sys; p=subprocess.run([sys.argv[1],'--self-test'],capture_output=True,text=True,timeout=30); print(p.stdout+p.stderr); assert p.returncode == 0, 'Frozen connector failed to import discovery and fiery_hold'" "$exe"
+          python -c "import subprocess,sys; p=subprocess.run([sys.argv[1],'--self-test'],capture_output=True,text=True,timeout=90); print(p.stdout+p.stderr); assert p.returncode == 0, 'Frozen connector failed to import discovery and fiery_hold'" "$exe"
 
       - name: Upload unsigned preview installer
         uses: actions/upload-artifact@v4
@@ -96,14 +96,14 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           $package = Join-Path $env:RUNNER_TEMP "MyraanaConnector.zip"
-          Compress-Archive -Path "$env:CONNECTOR_DIR/dist/MyraanaConnector" -DestinationPath $package -Force
+          Compress-Archive -Path "$env:CONNECTOR_DIR/dist/MyraanaConnector.exe" -DestinationPath $package -Force
           $hash = (Get-FileHash $package -Algorithm SHA256).Hash.ToLower()
           $checksum = Join-Path $env:RUNNER_TEMP "MyraanaConnector.sha256"
           "$hash  MyraanaConnector.zip" | Set-Content -Path $checksum -Encoding ascii
           $notes = Join-Path $env:RUNNER_TEMP "connector-release-notes.md"
           @"
-          Unsigned Windows connector with a simple setup window. Extract the ZIP and open MyraanaConnector.exe.
-          Closing the window leaves it running in the system tray. It can start with Windows after pairing. Opening it again reconnects with no code.
+          Unsigned Windows connector. On myraana.com, Connect this computer downloads one setup exe. Open that file.
+          It installs itself, pairs, and keeps running in the system tray. It can start with Windows. Opening it again reconnects with no code.
           This connector finds your printers and can place approved PRINT_READY files on your Fiery HOLD queue. It never prints or releases jobs.
           Source commit: $env:GITHUB_SHA
           ZIP SHA-256: $hash

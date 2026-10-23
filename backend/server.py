@@ -31,20 +31,31 @@ from p2g.card_flow import (
     known_finish,
     manual_press_message,
     mark_sent_to_fiery,
+    stage_fiery_hold,
     print_order,
     queue_bucket,
     queue_page_query,
     QUEUE_IDS,
 )
+from p2g.automatic import automatic_mode, timeline
 from p2g.connector_pairing import (
     approve_pairing,
+    approve_proof_token,
     claim_pairing,
+    create_enrollment_package,
     create_pairing,
+    create_proof_link,
     heartbeat as paired_heartbeat,
     devices as paired_devices,
     hold_pdf,
+    list_enrollments,
+    note_prepared_route,
     pairings,
     pairing_status,
+    proof_for_token,
+    queue_automatic_hold,
+    redeem_enrollment,
+    revoke_enrollment,
 )
 from p2g.catalog_seed import SpecError
 from p2g.costing import CostValidationError, cost_profile
@@ -248,6 +259,7 @@ async def shop_settings():
         settings.setdefault("shopName", "Print2Go")
         settings.setdefault("verifiedPrinters", [])
         settings.setdefault("jobDefaults", None)
+        settings.setdefault("automaticMode", True)
         return settings
     return {
         "printer": "",
@@ -258,6 +270,7 @@ async def shop_settings():
         "shopName": "Print2Go",
         "verifiedPrinters": [],
         "jobDefaults": None,
+        "automaticMode": True,
     }
 
 
@@ -682,6 +695,8 @@ async def settings(request: Request):
         "connectorConnected": connector_online(devices, agent),
         "scanPending": scan_is_due(settings_data),
         "discoveredPrinters": discovered_printers(settings_data, devices),
+        "enrollments": await list_enrollments(),
+        "automaticMode": automatic_mode(settings_data),
     }
 
 
@@ -706,6 +721,38 @@ async def approve_connector_pairing(pairing_id: str, request: Request):
 async def poll_connector_pairing(pairing_id: str, request: Request):
     payload = await request.json()
     return await pairing_status(pairing_id, str(payload.get("claimSecret") or ""))
+
+
+@api.post("/connector-enrollments")
+async def download_connector_setup(request: Request):
+    """One setup exe for this shop. Admin and operator. The token is the filename."""
+    assert_origin(request)
+    user = require_user(await current_user(request))
+    if user.get("role") not in {"admin", "operator"}:
+        raise AppError("Only an administrator or operator can connect this computer.", 403)
+    origin = request.headers.get("origin") or ""
+    content, filename = await create_enrollment_package(user, [origin, public_base(request)])
+    safe = str(filename).replace("\\", "").replace('"', "").replace("\r", "").replace("\n", "")
+    return Response(
+        content,
+        media_type="application/vnd.microsoft.portable-executable",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe}"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@api.post("/connector-enrollments/redeem")
+async def redeem_connector_enrollment(request: Request):
+    return await redeem_enrollment(await request.json())
+
+
+@api.post("/connector-enrollments/{enrollment_id}/revoke")
+async def revoke_connector_enrollment(enrollment_id: str, request: Request):
+    assert_origin(request)
+    return await revoke_enrollment(enrollment_id, require_admin(await current_user(request)))
 
 
 @api.post("/connector-devices/heartbeat")
@@ -748,6 +795,7 @@ async def update_settings(request: Request):
         "jobDefaults": current.get("jobDefaults"),
         "artworkRules": current.get("artworkRules"),
         "fieryAutoSend": payload.get("fieryAutoSend") is True if "fieryAutoSend" in payload else current.get("fieryAutoSend") is True,
+        "automaticMode": payload.get("automaticMode") is not False if "automaticMode" in payload else current.get("automaticMode") is not False,
     }
     for key in ("discoveredPrinters", "discoveredAt", "scanRequestedAt", "scanFulfilledAt"):
         if key in current:
@@ -756,6 +804,8 @@ async def update_settings(request: Request):
         current.get(key) != data.get(key)
         for key in ("printer", "stocks", "sides", "instructions")
     )
+    if not changed:
+        data["version"] = current["version"]
     await replace_settings(data)
     if changed:
         affected = await db.jobs.find(
@@ -1204,6 +1254,7 @@ async def job_detail(job_id: str, request: Request):
     if not job:
         raise AppError("Job not found.", 404)
     job["statusLabel"] = status_label(job)
+    job["timeline"] = timeline(job)
     return job
 
 
@@ -1397,7 +1448,9 @@ async def job_action(job_id: str, request: Request):
                 job["spec"]["finish"] = chosen
         matched = auto_send_ready(job, settings_data)
         london = is_london_card(job.get("recipe") or {})
-        if settings_data.get("fieryAutoSend") is True and london and fiery_target(settings_data) and not matched:
+        if automatic_mode(settings_data):
+            await queue_automatic_hold(job, user["name"])
+        elif settings_data.get("fieryAutoSend") is True and london and fiery_target(settings_data) and not matched:
             job["productionStop"] = (
                 "Fiery hold was not sent: the finish is not a cardstock on this shop's list. "
                 "Use the checklist. Nothing was printed."
@@ -1692,6 +1745,25 @@ async def job_action(job_id: str, request: Request):
             "manual": True,
         }
         job["manualFiery"] = {"at": now(), "actor": user["name"], "sha": print_ready["sha"]}
+    elif action == "run-job":
+        settings_data = await shop_settings()
+        if not automatic_mode(settings_data):
+            raise AppError("Automatic mode is off. Use the steps on this job.", 409)
+        if not latest(job, "ORIGINAL"):
+            raise AppError("Upload the artwork, then run the job.", 409)
+        if job["tasks"][6]["status"] != "Completed":
+            try:
+                result = await process_with_lease(job["id"], job["generation"], AUTO_ACTOR)
+                job = result["job"]
+            except AppError:
+                job = await get_job(job_id) or job
+        if job["tasks"][6]["status"] == "Completed":
+            ready_file = latest(job, "PRINT_READY")
+            approved = bool(ready_file) and (job.get("approval") or {}).get("sha") == ready_file.get("sha")
+            if approved:
+                await queue_automatic_hold(job, user["name"])
+            else:
+                await note_prepared_route(job)
     elif action == "send-hold":
         require_completed(job, 9)
         if (job.get("route") or {}).get("mode") != "production":
@@ -1702,38 +1774,20 @@ async def job_action(job_id: str, request: Request):
         printer = fiery_target(settings_data)
         if not printer:
             raise AppError(
-                "No Fiery is paired yet. Download the PRINT_READY file and send it yourself, or pair the connector.",
+                "No Fiery is paired yet. Download the PRINT_READY file and send it yourself, or pair the connector. Nothing was printed.",
                 409,
             )
-        route = dict(job.get("route") or {})
-        route["mode"] = "production"
-        route["printer"] = route.get("printer") or printer.get("name")
-        route["manual"] = False
-        route["settingsVersion"] = settings_data.get("version")
-        job["route"] = route
-        preset = "London BC" if is_london_card(job.get("recipe") or {}) else (
-            ((job.get("recipe") or {}).get("production") or {}).get("preset") or ""
-        )
-        job["fieryHold"] = {
-            "status": "queued",
-            "explicit": True,
-            "preset": preset or "London BC",
-            "stock": job.get("stock") or "",
-            "finish": job.get("finish"),
-            "printer": printer.get("name") or "",
-            "address": printer.get("address") or "",
-            "at": now(),
-            "held": False,
-            "printed": False,
-        }
-        job.pop("productionStop", None)
-        update_task(
-            job,
-            9,
-            "Running",
-            "Sending the PRINT_READY file to the Fiery hold queue. It will not print.",
-            user["name"],
-        )
+        try:
+            ready = await readiness(job)
+        except AppError as error:
+            raise AppError(f"{error.message} Nothing was printed.", error.status) from error
+        if ready.get("delivery") != "fiery_hold":
+            raise AppError("The shop computer cannot place this file on Fiery HOLD. Nothing was printed.", 409)
+        try:
+            stage_fiery_hold(job, ready, printer, user["name"], print_ready, now())
+        except ValueError as error:
+            raise AppError(str(error), 409) from error
+        record_event(job, "PRINT_READY is queued on the Fiery HOLD queue. It was not printed.", user["name"])
     else:
         raise AppError("This protected action is not available in the current workflow.")
     await save_job(job)
@@ -1744,7 +1798,43 @@ async def job_action(job_id: str, request: Request):
         except AppError:
             job = await get_job(job_id) or job
     job["statusLabel"] = status_label(job)
+    job["timeline"] = timeline(job)
     return job
+
+
+@api.post("/jobs/{job_id}/proof-link")
+async def job_proof_link(job_id: str, request: Request):
+    assert_origin(request)
+    user = require_user(await current_user(request))
+    job = await get_job(job_id)
+    if not job:
+        raise AppError("Job not found.", 404)
+    payload = await request.json()
+    result = await create_proof_link(job, user, public_base(request))
+    email = str((payload or {}).get("email") or "").strip()
+    if email:
+        try:
+            sent = send_email(
+                email,
+                "Approve your proof",
+                f"Approve this proof: {result['url']}\nApproving does not print the job.",
+            )
+            result["emailed"] = bool(sent.get("delivered"))
+        except Exception:
+            result["emailed"] = False
+    await save_job(job)
+    return result
+
+
+@api.get("/proofs/{token}")
+async def public_proof(token: str):
+    return await proof_for_token(token)
+
+
+@api.post("/proofs/{token}/approve")
+async def public_proof_approve(token: str, request: Request):
+    assert_origin(request)
+    return await approve_proof_token(token)
 
 
 @api.get("/files/{job_id}/{file_id}")

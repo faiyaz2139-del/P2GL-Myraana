@@ -24,7 +24,9 @@ TENANT_COLLECTIONS = frozenset({
     "recipes",
     "connector_pairings",
     "connector_devices",
+    "connector_enrollments",
     "connector_state",
+    "proof_links",
     "executions",
     "cost_profiles",
     "machine_capabilities",
@@ -171,6 +173,7 @@ def starter_settings(shop_name):
         "verifiedPrinters": [],
         "jobDefaults": None,
         "artworkRules": default_artwork_rules(),
+        "automaticMode": True,
     }
 
 

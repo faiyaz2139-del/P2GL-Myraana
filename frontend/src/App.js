@@ -347,6 +347,31 @@ function AssistantPanel({ job, settings, user, reload }) {
   </aside>;
 }
 
+function JobTimeline({ job, busy, ack, setAck, onRun, onApprove, onLink, onEmail, email, setEmail, linkNote, onPrinted, onCut }) {
+  const phases = Array.isArray(job.timeline) ? job.timeline : [];
+  const failed = phases.some((phase) => phase.state === "failed");
+  const approval = phases.find((phase) => phase.id === "approval");
+  const press = phases.find((phase) => phase.id === "press");
+  const proofOpen = phases.find((phase) => phase.id === "proof");
+  const showRun = failed || proofOpen?.state === "current" || proofOpen?.state === "waiting";
+  return <section className="next-action" data-testid="job-timeline">
+    <div className="next-label"><span className="eyebrow">THIS JOB</span><span>Automatic mode</span></div>
+    <ol className="job-timeline">{phases.map((phase) => <li key={phase.id} data-testid={`timeline-${phase.id}`} data-state={phase.state}><strong>{phase.title}</strong><span>{phase.state}</span>{phase.detail ? <p>{phase.detail}</p> : null}</li>)}</ol>
+    {showRun && <button className="primary" disabled={busy} data-testid={failed ? "fix-and-retry-button" : "run-job-button"} onClick={onRun}>{failed ? "Fix and retry" : "Run job"}</button>}
+    {approval?.state === "current" && <div className="action-row">
+      <button className="primary" disabled={busy} data-testid="approved-by-customer-button" onClick={onApprove}>Approved by customer</button>
+      <button className="button" disabled={busy} data-testid="copy-approval-link" onClick={onLink}>Copy approval link</button>
+    </div>}
+    {approval?.state === "current" && <label>Email the approval link<input value={email} onChange={(event) => setEmail(event.target.value)} data-testid="approval-email-input" /></label>}
+    {approval?.state === "current" && <button className="button" disabled={busy || !email} data-testid="email-approval-link" onClick={onEmail}>Email the approval link</button>}
+    {linkNote && <p className="notice" data-testid="approval-link-note">{linkNote}</p>}
+    {job.automatic?.routeNote && <p className="notice" data-testid="automatic-route-note">{job.automatic.routeNote}</p>}
+    {job.automatic?.error && <p className="notice warning" data-testid="automatic-error">{job.automatic.error}</p>}
+    {press?.state === "current" && (job.tasks || [])[12]?.status !== "Completed" && <HumanAction label="The sheets have physically printed. A file copy does not count." buttonLabel="Confirm printed" ack={ack} setAck={setAck} busy={busy} testId="confirm-printed" onAction={onPrinted} />}
+    {press?.state === "current" && (job.tasks || [])[12]?.status === "Completed" && (job.tasks || [])[13]?.status !== "Completed" && <HumanAction label="The pieces have been cut and finished as ordered." buttonLabel="Confirm cut" ack={ack} setAck={setAck} busy={busy} testId="confirm-cut" onAction={onCut} />}
+  </section>;
+}
+
 function JobView({ job, reload, back, settings, user, openSettings, onArchived }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -355,7 +380,16 @@ function JobView({ job, reload, back, settings, user, openSettings, onArchived }
   const [uploadAck, setUploadAck] = useState(false);
   const [agentReview, setAgentReview] = useState(null);
   const [proofFinish, setProofFinish] = useState(knownFinish(job.finish));
+  const [showSteps, setShowSteps] = useState(false);
+  const [approvalEmail, setApprovalEmail] = useState("");
+  const [linkNote, setLinkNote] = useState("");
+  const automatic = settings?.automaticMode !== false;
   useEffect(() => { setProofFinish(knownFinish(job.finish)); }, [job.id, job.finish]);
+  useEffect(() => {
+    if (!automatic || job.fieryHold?.status !== "queued") return undefined;
+    const timer = setInterval(() => { reload(); }, 3000);
+    return () => clearInterval(timer);
+  }, [automatic, job.fieryHold?.status, job.id, reload]);
   const current = job.tasks.findIndex((task) => task.status !== "Completed");
   const task = job.tasks[current] || job.tasks[job.tasks.length - 1];
   const visualStatus = displayStatus(job, task);
@@ -562,7 +596,9 @@ function JobView({ job, reload, back, settings, user, openSettings, onArchived }
       <div className="summary-strip"><div><span>Finished size</span><strong>{job.spec ? `${trimNumber(job.spec.width)} × ${trimNumber(job.spec.height)} ${job.spec.unit}` : `${job.recipe.width} × ${job.recipe.height} in`}</strong></div><div><span>Stock</span><strong>{job.stock}</strong></div><div><span>Finish</span><strong>{job.finish}</strong></div><div><span>Progress</span><strong>{job.tasks.filter((item) => item.status === "Completed").length} of 16 steps</strong></div></div>
       <div className="progress-line" data-testid="job-progress">{job.tasks.map((item) => <div key={item.id} className={item.status === "Completed" ? "done" : item.status === "Running" ? "running" : ""} />)}</div>
       {job.cardRoute && <p className={`notice${job.cardRoute.stop ? " warning" : ""}`} data-testid="card-route"><StepKind kind={job.cardRoute.kind} /> {job.cardRoute.message}</p>}
-      <section className="next-action prominent" data-testid="next-action-panel"><div className="next-label"><span className="eyebrow">YOUR NEXT STEP</span><span>Step {Math.max(current, 0) + 1} of 16</span></div><h2>{current === 7 ? "Check the proof" : task.title}</h2><p>{task.result}</p>{job.fieryHold?.status === "failed" && <p className="notice warning" data-testid="fiery-hold-error">{job.fieryHold.error || "The Fiery Hold queue did not confirm the file. Nothing was printed."}</p>}{actionPanel()}</section>
+      {automatic && <JobTimeline job={job} busy={busy} ack={ack} setAck={setAck} email={approvalEmail} setEmail={setApprovalEmail} linkNote={linkNote} onRun={() => act("run-job")} onApprove={() => act("approve", { sha: proof?.sha, acknowledged: true, finish: proofFinish || job.finish })} onLink={async () => { const result = await api(`jobs/${job.id}/proof-link`, { method: "POST", body: "{}" }); setLinkNote(result.url || ""); try { await navigator.clipboard.writeText(result.url || ""); } catch (reason) { setLinkNote(result.url || reason.message); } }} onEmail={async () => { const result = await api(`jobs/${job.id}/proof-link`, { method: "POST", body: JSON.stringify({ email: approvalEmail }) }); setLinkNote(result.emailed ? "The approval link was emailed. Approving does not print the job." : (result.url || "")); }} onPrinted={() => act("printed", { acknowledged: ack })} onCut={() => act("cut", { acknowledged: ack })} />}
+      {automatic && <button type="button" className="text-button" data-testid="show-the-steps" onClick={() => setShowSteps((value) => !value)}>{showSteps ? "Hide the steps" : "Show the steps"}</button>}
+      {(!automatic || showSteps) && <section className="next-action prominent" data-testid="next-action-panel"><div className="next-label"><span className="eyebrow">YOUR NEXT STEP</span><span>Step {Math.max(current, 0) + 1} of 16</span></div><h2>{current === 7 ? "Check the proof" : task.title}</h2><p>{task.result}</p>{job.fieryHold?.status === "failed" && <p className="notice warning" data-testid="fiery-hold-error">{job.fieryHold.error || "The Fiery Hold queue did not confirm the file. Nothing was printed."}</p>}{actionPanel()}</section>}
       {proof && <section className="proof-section" data-testid="production-proof-section"><div className="section-heading"><h3>Production proof</h3><a className="text-button" href={`${API}/files/${job.id}/${proof.id}?download`} data-testid="download-print-ready-link"><Download size={15} />Download PDF</a></div><div className="proof-holder"><div className="proof-pages">{Array.from({ length: job.sides }).map((_, index) => <div className="proof-page" key={index}><p>{index ? "Back" : "Front"}</p><img src={`${API}/files/${job.id}/${proof.id}/preview/${index + 1}`} alt={`Proof page ${index + 1}`} data-testid={`proof-page-${index + 1}`} /></div>)}</div></div><div className="file-identity"><ShieldCheck size={15} /><span>Actual generated production file<small data-testid="print-ready-sha">SHA-256 {proof.sha}</small></span></div></section>}
       {job.inspection && <details className="inspection-details" open={job.inspection.errors.length > 0} data-testid="inspection-details"><summary><AlertTriangle size={16} />Artwork inspection · {job.inspection.errors.length} blocking issue(s)</summary><div>{job.inspection.errors.map((item) => <p className="notice warning" key={item}>{item}</p>)}{job.inspection.actions?.map((item) => <p className="inspection-note" key={item}>Corrective action: {item}</p>)}{job.inspection.warnings.map((item) => <p className="inspection-note" key={item}>{item}</p>)}</div></details>}
       <details className="history-details" data-testid="done-automatically"><summary>Done automatically ({job.tasks.filter((item) => item.status === "Completed").length})</summary><section className="tasks-section"><div className="section-heading"><h3>Production recipe</h3><span>{job.tasks.filter((item) => item.status === "Completed").length} / 16 complete</span></div><div className="task-list">{job.tasks.map((item, index) => <details className={`task ${index === current ? "current" : ""}`} key={item.id}><summary data-testid={`task-${index + 1}-summary`}><span className={`task-number ${item.status === "Completed" ? "done" : ""}`}>{item.status === "Completed" ? <Check size={15} /> : index + 1}</span><span className="task-title">{item.title}<small>{item.party === "Application" ? "Automated check" : "Human confirmation"}</small></span><Badge status={item.status} /></summary><div className="task-details"><p>{item.result}</p><div className="task-meta"><span>Updated {date(item.updated)}</span></div></div></details>)}</div></section><ul className="audit-events" data-testid="job-history">{[...(job.events || [])].slice().reverse().map((event) => <li key={event.id}><p>{event.actor}: {event.text}</p></li>)}</ul><section className="history-details" data-testid="production-review-panel"><div className="next-label"><span className="eyebrow">PRODUCTION REVIEW</span><span>{settings?.aiConnected ? "AI-assisted" : "Rule-based review"}</span></div><h2>Run AI Production Review</h2><p>Reviews saved job evidence only. It cannot approve, complete workflow steps, or print.</p><button className="button" onClick={runAgentReview} disabled={busy} data-testid="run-production-review-button"><ShieldCheck size={17} />{busy ? "Reviewing…" : "Run AI Production Review"}</button>{agentReview && <div className="inspection-details" data-testid="production-review-results"><div className="section-heading"><div><h3 data-testid="production-review-headline">{(agentReview.headline || reviewHeadline(agentReview.results)).title}</h3><p data-testid="production-review-detail">{(agentReview.headline || reviewHeadline(agentReview.results)).detail}</p></div><span>{settings?.aiConnected ? "AI-assisted" : "Rule-based review"}</span></div>{(agentReview.results || []).map((item) => <div className="inspection-note" key={`${agentReview.execution}-${item.agent}`}><strong>{item.agent} · {item.status}</strong><p>{item.summary}</p>{item.stop_reasons?.length > 0 && <p>Next: {item.stop_reasons.join(" ")}</p>}{item.warnings?.length > 0 && <p>Next: {item.warnings.join(" ")}</p>}{item.data?.selected_plan?.cost_estimate && <p data-testid="cost-estimate-summary">Cost {item.data.selected_plan.cost_estimate.total} · Margin {item.data.selected_plan.cost_estimate.profit_margin_percent ?? "unavailable"}%</p>}{item.data?.money_cost === "UNKNOWN" && <p data-testid="cost-inputs-missing">Cost inputs are unavailable; no cheapest route is claimed.</p>}</div>)}</div>}</section></details>
@@ -744,7 +780,7 @@ function PrinterPicker({ settings, selected, onSelect, user, reload, testPrefix,
     </label>}
     {online && !printers.length && !showSpinner && <p data-testid={ids.empty}>No printers yet. Scan again, or check that the press is turned on.</p>}
     {!online && <div className="notice warning" data-testid={ids.offline}>
-      <p>The shop connector is not connected, so Myraana cannot see printer names. In Shop settings, download the Windows Connector, click Pair connector, enter {typeof window !== "undefined" ? window.location.origin : "this website"} and the one-time code in the connector window, click Connect, then Approve the computer. A Mac or Linux shop computer can download the connector script and run it with Python 3 using the same code. As a last resort, type the press name below.</p>
+      <p>The shop connector is not connected, so Myraana cannot see printer names. Use Connect this computer at the top of the page. A Mac or Linux shop computer can use Other ways to connect. As a last resort, type the press name below.</p>
       {onOpenSettings && <button type="button" className="button" onClick={onOpenSettings} data-testid={`${testPrefix}-open-settings`}>Open shop settings</button>}
     </div>}
     {!online && user?.role === "admin" && <label>Printer name<input value={selected} onChange={(event) => onSelect(event.target.value)} data-testid={ids.manual} /></label>}
@@ -1223,7 +1259,9 @@ function DiscoveredPrinters({ settings, user, reload }) {
 }
 
 function Settings({ settings, user, reload }) {
+  const location = useLocation();
   const [message, setMessage] = useState("");
+  const [otherWays, setOtherWays] = useState(location.hash === "#other-ways");
   const [pairingMessage, setPairingMessage] = useState("");
   const [approveError, setApproveError] = useState("");
   const [openPairing, setOpenPairing] = useState(readOpenPairing);
@@ -1242,6 +1280,7 @@ function Settings({ settings, user, reload }) {
   const newestClaim = newestFoundPairing(settings.pairings);
   const codeOpen = Boolean(openPairing?.id) || (settings.pairings || []).some((item) => pairingStillValid(item));
   useEffect(() => { api("build-info").then(setBuild).catch(() => setBuild(null)); }, []);
+  useEffect(() => { if (location.hash === "#other-ways") setOtherWays(true); }, [location.hash]);
   useEffect(() => {
     if (!codeOpen) return undefined;
     const timer = setInterval(() => { reloadRef.current(); }, PAIRING_POLL_MS);
@@ -1306,6 +1345,7 @@ function Settings({ settings, user, reload }) {
           sides: [1, 2],
           instructions: form.get("instructions"),
           fieryAutoSend: form.get("fieryAutoSend") === "on",
+          automaticMode: form.get("automaticMode") === "on",
         }),
       });
       setMessage("Shop settings saved. Active jobs require a route review.");
@@ -1343,6 +1383,7 @@ function Settings({ settings, user, reload }) {
             <PrinterPicker settings={settings} selected={printer} onSelect={setPrinter} user={user} reload={reload} testPrefix="settings" />
             <label>Supported stocks<textarea name="stocks" defaultValue={(settings.stocks || []).join("\n")} data-testid="stocks-input" /></label>
             <label>Handoff instructions<textarea name="instructions" defaultValue={settings.instructions} data-testid="handoff-instructions-input" /></label>
+            <label className="check-label"><input type="checkbox" name="automaticMode" defaultChecked={settings.automaticMode !== false} data-testid="automatic-mode-toggle" />Automatic mode. Myraana runs the steps and stops for customer approval. Turn this off to use each step yourself.</label>
             <label className="check-label"><input type="checkbox" name="fieryAutoSend" defaultChecked={settings.fieryAutoSend === true} data-testid="fiery-auto-send-toggle" />After proof approval, send the PRINT_READY file to the Fiery hold queue. The job stays on HOLD and is never printed automatically.</label>
             <button className="primary" data-testid="save-settings-button">Save shop settings</button>
           </fieldset>
@@ -1352,12 +1393,16 @@ function Settings({ settings, user, reload }) {
       <DiscoveredPrinters settings={settings} user={user} reload={reload} />
       <section className="settings-card">
         <div className="section-heading"><h3>Connect shop</h3><Link2 /></div>
-        <p data-testid="connector-status">{online ? "The shop connector is connected. It reports printers on this network, and Scan again asks it to look now." : offlineDevices.length ? offlineDevices.map(connectorTrayHint).join(" ") : "The shop connector is not connected. Download it below, click Pair connector, enter this website and the one-time code, then click Connect. A code you just created is approved while this page stays open. Until then a proof-only route is available, and an admin can type a press name as a last resort."}</p>
+        <p data-testid="connector-status">{online ? "The shop connector is connected. It reports printers on this network, and Scan again asks it to look now." : offlineDevices.length ? offlineDevices.map(connectorTrayHint).join(" ") : "This computer is not connected. Use Connect this computer at the top of the page. Other ways to connect stays available for a pairing code."}</p>
         <p data-testid="connector-shop-note">Each shop pairs its own Windows Connector from this page. The pairing code belongs to this shop only.</p>
         {settings.legacyConnector && <a className="button" href="/setup/print2go-connector.py" download data-testid="download-connector-link"><Download size={16} />Download Print2Go legacy connector</a>}
         <details className="technical"><summary data-testid="connector-setup-summary">Connection setup</summary><ol><li>Pair this shop’s Windows Connector with the one-time code below. No shared secret is required.</li><li>The original Print2Go installation can keep using its server connector secret. That secret does not open another shop.</li><li>The connector stages authorized PDFs only. It never prints.</li></ol></details>
       </section>
-      {user.role === "admin" && <ConnectorPairing settings={settings} openPairing={openPairing} onStart={startPairing} />}
+      <section className="settings-card" id="other-ways">
+        <button type="button" className="text-button" data-testid="other-ways-to-connect" onClick={() => setOtherWays((value) => !value)}>Other ways to connect</button>
+        {otherWays && user.role === "admin" && <ConnectorPairing settings={settings} openPairing={openPairing} onStart={startPairing} />}
+        {otherWays && user.role !== "admin" && <p className="muted">Ask an administrator for a pairing code, or use Connect this computer.</p>}
+      </section>
       {user.role === "admin" && <CostProfiles />}
       {user.role === "admin" && <Operators user={user} />}
     </div>
@@ -1598,6 +1643,104 @@ function PlatformScreen({ onSignedOut }) {
   </div>;
 }
 
+const THIS_COMPUTER_KEY = "myraana.thisComputer";
+
+function onWindows() {
+  return typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent || "");
+}
+
+function rememberedComputer() {
+  try {
+    return localStorage.getItem(THIS_COMPUTER_KEY) || "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function rememberComputer(id) {
+  try {
+    if (id) localStorage.setItem(THIS_COMPUTER_KEY, id);
+  } catch (error) {
+    return;
+  }
+}
+
+function fieryBannerName(settings) {
+  const printers = settings?.discoveredPrinters || [];
+  const names = printers.map((item) => item?.name || "").join(" ");
+  const printer = settings?.printer || "";
+  const text = `${names} ${printer}`;
+  if (/EX-Li PX300/i.test(text)) return "EX-Li PX300";
+  const fiery = printers.find((item) => item?.isFiery && item.name);
+  return fiery?.name || printer;
+}
+
+function connectedDevices(settings) {
+  return (settings?.pairedDevices || []).filter((item) => item?.status === "Connected");
+}
+
+function connectBannerState(settings, user, pending) {
+  if (!user || !onWindows()) return null;
+  if (user.role !== "admin" && user.role !== "operator") return null;
+  if (!settings) return null;
+  const connected = connectedDevices(settings);
+  const remembered = rememberedComputer();
+  const mine = connected.find((item) => item.id === remembered);
+  const fiery = fieryBannerName(settings);
+  if (mine && fiery && !pending) return { kind: "ready", fiery };
+  return { kind: "connect" };
+}
+
+async function downloadConnectorSetup() {
+  const response = await fetch(`${API}/connector-enrollments`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!response.ok) {
+    let message = "The setup file could not be downloaded.";
+    try {
+      const data = await response.json();
+      if (data?.error) message = data.error;
+    } catch (error) {
+      message = "The setup file could not be downloaded.";
+    }
+    throw new Error(message);
+  }
+  const header = response.headers.get("Content-Disposition") || "";
+  const match = /filename="([^"]+)"/.exec(header);
+  const filename = match ? match[1] : "";
+  if (!filename.startsWith("MyraanaConnector-Setup-") || !filename.toLowerCase().endsWith(".exe")) {
+    throw new Error("Download Connect this computer again. Open that file. Do not rename it.");
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function ConnectComputerBanner({ settings, user, pending, hint, onConnect, onOther }) {
+  const state = connectBannerState(settings, user, pending);
+  if (!state) return null;
+  if (state.kind === "ready") {
+    return <div className="connect-banner ready" data-testid="connect-this-computer-ready">This computer is connected · Fiery {state.fiery} ready</div>;
+  }
+  return <div className="connect-banner" data-testid="connect-this-computer-banner">
+    <div>
+      <h2>Connect this computer to your printers</h2>
+      <button type="button" className="text-button" data-testid="banner-other-ways" onClick={onOther}>Other ways to connect</button>
+    </div>
+    <button type="button" className="primary" data-testid="connect-this-computer-button" onClick={onConnect}>Connect this computer</button>
+    {hint && <p className="download-hint" data-testid="connect-download-hint">Open the file that just downloaded. That's it.<span className="download-arrow" aria-hidden="true">↓</span></p>}
+  </div>;
+}
+
 function Studio() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -1612,6 +1755,9 @@ function Studio() {
   const [catalog, setCatalog] = useState(null);
   const [job, setJob] = useState(null);
   const [newJob, setNewJob] = useState(false);
+  const [setupHint, setSetupHint] = useState(false);
+  const [setupSnapshot, setSetupSnapshot] = useState({});
+  const [setupError, setSetupError] = useState("");
   const [theme, setTheme] = useState("light");
   const [error, setError] = useState("");
   const view = location.pathname.startsWith("/settings")
@@ -1666,9 +1812,40 @@ function Studio() {
   }, [auth?.user, jobId, view, shopOpen]);
   const reloadJob = async () => {
     const id = job?.id || jobId;
-    if (!id) return;
-    setJob(await api(`jobs/${id}`));
+    if (!id) return null;
+    const detail = await api(`jobs/${id}`);
+    setJob(detail);
     await load();
+    return detail;
+  };
+  const banner = connectBannerState(settings, auth?.user, setupHint);
+  useEffect(() => {
+    if (!banner || banner.kind === "ready") return undefined;
+    const timer = setInterval(() => { load(); }, PAIRING_POLL_MS);
+    return () => clearInterval(timer);
+  }, [banner?.kind, auth?.user, shopOpen]);
+  useEffect(() => {
+    if (!setupHint) return;
+    const fiery = fieryBannerName(settings);
+    const connected = connectedDevices(settings);
+    const arrived = connected.filter((item) => !(item.id in setupSnapshot));
+    const updated = connected.filter((item) => item.id in setupSnapshot && item.lastSeen !== setupSnapshot[item.id]);
+    const chosen = arrived[0] || updated.slice().sort((left, right) => String(right.lastSeen || "").localeCompare(String(left.lastSeen || "")))[0];
+    if (!chosen || !fiery) return;
+    rememberComputer(chosen.id);
+    setSetupHint(false);
+  }, [setupHint, settings, setupSnapshot]);
+  const connectThisComputer = async () => {
+    setSetupError("");
+    const snapshot = {};
+    connectedDevices(settings).forEach((item) => { snapshot[item.id] = item.lastSeen || ""; });
+    try {
+      await downloadConnectorSetup();
+      setSetupSnapshot(snapshot);
+      setSetupHint(true);
+    } catch (reason) {
+      setSetupError(reason.message || "The setup file could not be downloaded.");
+    }
   };
   const nav = useMemo(() => [["jobs", "Jobs", FileText], ["recipes", "Recipes", Layers], ["settings", "Shop settings", Settings2]], []);
   if (!auth) return <div className="auth-shell" data-testid="loading-screen"><p>{error || "Opening your shop…"}</p></div>;
@@ -1704,6 +1881,8 @@ function Studio() {
         <button className="text-button" onClick={async () => { await api("auth/logout", { method: "POST", body: "{}" }); setAuth({ user: null, needsSetup: false }); navigate("/login"); }} data-testid="logout-button"><LogOut size={16} />Sign out</button>
       </div>
     </header>
+    <ConnectComputerBanner settings={settings} user={auth.user} pending={setupHint} hint={setupHint} onConnect={connectThisComputer} onOther={() => navigate("/settings#other-ways")} />
+    {setupError && <div className="error-bar" data-testid="connect-setup-error">{setupError}</div>}
     {error && <div className="error-bar" data-testid="global-error"><AlertTriangle />{error}<button className="icon-button" onClick={() => setError("")} data-testid="dismiss-error-button"><X /></button></div>}
     {view === "jobs" && !job && <main className="jobs-page" data-testid="jobs-page">
       <div className="page-heading"><div><span className="eyebrow">YOUR PRODUCTION WORKSPACE</span><h1>Jobs</h1><p className="muted">Needs you, waiting, ready to print, and done. One next action at a time.</p></div><button className="primary" onClick={() => setNewJob(true)} data-testid="start-job-button"><Plus />Start a job</button></div>
@@ -1723,10 +1902,53 @@ function Studio() {
   </div>;
 }
 
+function ProofApproval() {
+  const { token } = useParams();
+  const [proof, setProof] = useState(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  useEffect(() => {
+    fetch(`${API}/proofs/${token}`, { credentials: "include" })
+      .then(async (response) => {
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || "This approval link is invalid or expired.");
+        setProof(data);
+      })
+      .catch((reason) => setError(reason.message));
+  }, [token]);
+  const approve = async () => {
+    setError("");
+    const response = await fetch(`${API}/proofs/${token}/approve`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      setError(data.error || "This approval link is invalid or expired.");
+      return;
+    }
+    setMessage("Approved. Nothing was printed.");
+    setProof((current) => ({ ...(current || {}), status: "approved" }));
+  };
+  return <main className="auth-shell" data-testid="proof-approval-page">
+    <section className="auth-form">
+      <h2>Approve this proof</h2>
+      {error && <p className="notice warning" data-testid="proof-approval-error">{error}</p>}
+      {proof && <p data-testid="proof-approval-summary">{proof.customer} · {proof.product}</p>}
+      {message && <p className="notice" data-testid="proof-approval-done">{message}</p>}
+      {proof?.status !== "approved" && <button className="primary" data-testid="proof-approve-button" onClick={approve}>Approve</button>}
+      <p className="muted">Approving does not print the job.</p>
+    </section>
+  </main>;
+}
+
 function App() {
   return <BrowserRouter>
     <Routes>
       <Route path="/" element={<Home />} />
+      <Route path="/proof/:token" element={<ProofApproval />} />
       <Route path="/signup" element={<Signup />} />
       <Route path="/contact" element={<Contact />} />
       <Route path="/privacy" element={<Legal kind="privacy" />} />
