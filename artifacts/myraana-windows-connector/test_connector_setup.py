@@ -542,6 +542,122 @@ class ConnectorSetupTests(unittest.TestCase):
         self.assertNotIn("hot_folder", submitted)
         self.assertNotIn("operator_folder", submitted)
 
+    def test_setup_filename_carries_the_token_and_the_install_name_does_not(self):
+        token = "a" * 32
+        self.assertEqual(connector.setup_token_from_filename(f"MyraanaConnector-Setup-{token}.exe"), token)
+        self.assertEqual(connector.setup_token_from_filename(r"C:\Users\Op\Downloads\MyraanaConnector-Setup-" + token + ".exe"), token)
+        self.assertEqual(connector.setup_token_from_filename("MyraanaConnector-Setup.exe"), "")
+        self.assertEqual(connector.setup_token_from_filename("MyraanaConnector.exe"), "")
+        import tempfile
+        source = pathlib.Path(tempfile.mkdtemp()) / f"MyraanaConnector-Setup-{token}.exe"
+        source.write_bytes(b"MZ-setup-exe")
+        spawned = {}
+
+        def spawn(argv, env):
+            spawned["argv"] = argv
+            spawned["env"] = env
+
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            dest = connector.handoff_setup(str(source), token, spawn=spawn)
+            self.assertEqual(pathlib.Path(dest).name, "MyraanaConnector.exe")
+            self.assertNotIn(token, pathlib.Path(dest).name)
+            self.assertEqual(pathlib.Path(dest).read_bytes(), b"MZ-setup-exe")
+            self.assertTrue(str(dest).startswith(folder))
+        self.assertEqual(spawned["env"]["MYRAANA_ENROLL_TOKEN"], token)
+        self.assertEqual(spawned["argv"], [dest])
+
+    def test_enrollment_token_redeems_without_a_code(self):
+        stop = threading.Event()
+        calls = []
+        reports = []
+        credentials = {}
+
+        def secret(name, value=None):
+            if value is not None:
+                credentials[name] = value
+            return credentials.get(name)
+
+        def request(url, path, payload, credential=None):
+            calls.append((path, payload, credential))
+            if path.endswith("/redeem"):
+                self.assertEqual(payload["token"], "b" * 40)
+                return {"credential": "enrolled-token", "status": "Connected"}
+            stop.set()
+            return {}
+
+        with patch.dict(os.environ, {"MYRAANA_ENROLL_TOKEN": "b" * 40}), \
+             patch.object(connector, "load_state", return_value={}), \
+             patch.object(connector, "save_state"), \
+             patch.object(connector, "secret", side_effect=secret), \
+             patch.object(connector, "request", side_effect=request), \
+             patch.object(connector, "inventory", return_value={"hostname": "P2GL-2", "printers": [{"name": "EX-Li PX300", "isFiery": True}]}), \
+             patch.object(connector, "ensure_default_startup", return_value=True), \
+             patch.object(stop, "wait", return_value=False):
+            connector.run("https://preview.example.com", report=reports.append, stop=stop)
+            self.assertNotIn("MYRAANA_ENROLL_TOKEN", os.environ)
+        self.assertEqual(calls[0][0], "/connector-enrollments/redeem")
+        self.assertNotIn("/connector-pairings/claim", [item[0] for item in calls])
+        self.assertIn(connector.TOAST_MESSAGE, reports)
+        self.assertEqual(credentials["credential"], "enrolled-token")
+
+    def test_saved_credential_does_not_consume_an_enrollment_token(self):
+        stop = threading.Event()
+        calls = []
+
+        def request(url, path, payload, credential=None):
+            calls.append(path)
+            stop.set()
+            return {}
+
+        with patch.dict(os.environ, {"MYRAANA_ENROLL_TOKEN": "c" * 40}), \
+             patch.object(connector, "load_state", return_value={"websiteUrl": "https://preview.example.com"}), \
+             patch.object(connector, "save_state"), \
+             patch.object(connector, "secret", side_effect=lambda name, value=None: "token" if name == "credential" else "claim"), \
+             patch.object(connector, "inventory", return_value={"printers": []}), \
+             patch.object(connector, "ensure_default_startup", return_value=True), \
+             patch.object(connector, "request", side_effect=request):
+            connector.run("https://preview.example.com", report=lambda message: None, stop=stop)
+            self.assertNotIn("MYRAANA_ENROLL_TOKEN", os.environ)
+        self.assertEqual(calls, ["/connector-devices/heartbeat"])
+
+    def test_update_hash_must_match_before_the_file_changes(self):
+        import hashlib
+        import tempfile
+        payload = b"replacement-exe"
+        digest = hashlib.sha256(payload).hexdigest()
+        manifest = {"url": "https://example.com/releases/MyraanaConnector.exe", "sha256": digest, "version": "2"}
+        written = []
+        state = {}
+        with patch.object(connector, "save_state"):
+            rejected = connector.consider_update(
+                manifest, state, fetcher=lambda url: b"not-the-file", writer=lambda body: written.append(body),
+            )
+        self.assertFalse(rejected)
+        self.assertEqual(written, [])
+        self.assertEqual(state.get("updateRejected"), digest)
+        self.assertNotIn("updateSha", state)
+        fresh = {}
+        with patch.object(connector, "save_state"):
+            accepted = connector.consider_update(
+                manifest, fresh, fetcher=lambda url: payload, writer=lambda body: written.append(body),
+            )
+        self.assertTrue(accepted)
+        self.assertEqual(written, [payload])
+        self.assertEqual(fresh.get("updateSha"), digest)
+        self.assertFalse(connector.consider_update(
+            {"url": "http://example.com/MyraanaConnector.exe", "sha256": digest}, {},
+            fetcher=lambda url: payload, writer=lambda body: written.append(body),
+        ))
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            dest = pathlib.Path(connector.installed_exe())
+            dest.parent.mkdir(parents=True)
+            dest.write_bytes(b"old")
+            pending = pathlib.Path(str(dest) + ".new")
+            pending.write_bytes(payload)
+            self.assertTrue(connector.apply_staged_update())
+            self.assertEqual(dest.read_bytes(), payload)
+            self.assertFalse(pending.exists())
+
 
 def _transport_down(*_args, **_kwargs):
     raise RuntimeError("down")

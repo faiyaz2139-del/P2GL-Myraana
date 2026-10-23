@@ -435,6 +435,75 @@ def record_successful_hold(job, shop_stocks):
     return {"stop": None, "done": False, "checklist": job["productionChecklist"]}
 
 
+def stage_fiery_hold(job, ready, printer, actor, print_ready, at=""):
+    """Finish readiness and authorization, then queue HOLD. This never prints."""
+    if (ready or {}).get("delivery") != "fiery_hold":
+        raise ValueError("The shop computer cannot place this file on Fiery HOLD. Nothing was printed.")
+    tasks = job.get("tasks") or []
+    if len(tasks) < 13:
+        raise ValueError("This job is missing steps.")
+    if tasks[12].get("status") == "Completed":
+        raise ValueError("Printing was already confirmed. Nothing else was sent.")
+    host = str((ready or {}).get("hostname") or "The shop computer")
+    printer = printer or {}
+    name = str(printer.get("name") or "")
+    preset = "London BC" if is_london_card((job or {}).get("recipe") or {}) else (
+        (((job or {}).get("recipe") or {}).get("production") or {}).get("preset") or "London BC"
+    )
+    notes = (
+        (9, "Completed", "Sending the PRINT_READY file to the Fiery HOLD queue. It will not print."),
+        (10, "Completed", f"{host} is connected. The PRINT_READY file will be sent to Fiery HOLD. This does not print."),
+        (11, "Completed", f"Sending the PRINT_READY file to Fiery HOLD on {host}. It will not print."),
+    )
+    for index, status, result in notes:
+        tasks[index]["status"] = status
+        tasks[index]["result"] = result
+        if at:
+            tasks[index]["updated"] = at
+            tasks[index]["finished"] = at
+    tasks[12]["status"] = "Waiting for operator"
+    tasks[12]["result"] = "Confirm only after physical sheets print."
+    if at:
+        tasks[12]["updated"] = at
+    line = duplo_line(job)
+    if line and len(tasks) > 13 and tasks[13].get("status") != "Completed":
+        tasks[13]["result"] = line
+    job["readiness"] = {
+        "checkedAt": at,
+        "deviceId": ready.get("id") or "",
+        "hostname": host,
+        "lastSeen": ready.get("lastSeen") or "",
+        "delivery": "fiery_hold",
+    }
+    job["authorization"] = {
+        "sha": (print_ready or {}).get("sha") or "",
+        "fileId": (print_ready or {}).get("id") or "",
+        "generation": job.get("generation"),
+        "actor": actor,
+        "at": at,
+    }
+    route = dict(job.get("route") or {})
+    route["mode"] = "production"
+    route["printer"] = name or route.get("printer")
+    route["manual"] = False
+    job["route"] = route
+    job["fieryHold"] = {
+        "status": "queued",
+        "explicit": True,
+        "deviceId": ready.get("id") or "",
+        "preset": preset or "London BC",
+        "stock": job.get("stock") or "",
+        "finish": job.get("finish") or "",
+        "printer": name,
+        "address": printer.get("address") or "",
+        "at": at,
+        "held": False,
+        "printed": False,
+    }
+    job.pop("productionStop", None)
+    return job
+
+
 def hold_failure_message(error):
     detail = str(error or "Fiery did not accept the hold.").strip()
     return f"Fiery hold failed: {detail} Use the checklist. Nothing was printed."

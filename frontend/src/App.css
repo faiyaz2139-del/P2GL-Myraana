@@ -12,6 +12,18 @@
 .topbar > .brand{border:0;background:none;color:inherit;padding:0;text-align:left}.proof-page img{width:100%;height:auto;display:block;box-shadow:0 5px 16px #0001;background:#fff;max-width:520px;border-radius:2px}
 img.brand-mark{width:40px;height:40px;border-radius:11px;background:transparent;box-shadow:none;object-fit:cover}
 .job-modal{width:min(760px,100%)}
+.connect-banner{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:22px 36px;background:#12315c;color:#fff;flex-wrap:wrap}
+.connect-banner h2{color:#fff;font-size:26px;letter-spacing:-.4px}
+.connect-banner .text-button{color:#d5e2ff}
+.connect-banner .primary{background:#fff;color:#12315c;border-color:#fff}
+.connect-banner.ready{background:#e5f6ee;color:#145c3e;font-size:18px;font-weight:650}
+.download-hint{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:#12315c;color:#fff;padding:16px 22px;border-radius:14px;z-index:80;text-align:center;box-shadow:var(--shadow)}
+.download-arrow{display:block;font-size:32px;line-height:1;margin-top:4px}
+.job-timeline{list-style:none;padding:0;margin:8px 0 16px;display:grid;gap:8px}
+.job-timeline li{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:baseline;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+.job-timeline li[data-state="failed"]{background:var(--warn);color:var(--warn-ink)}
+.job-timeline li[data-state="done"]{opacity:.8}
+.job-timeline li p{flex-basis:100%;margin:0}
 .badge.connected,.badge.verified,.badge.proof-approved{color:var(--green);background:color-mix(in srgb,var(--green) 12%,var(--panel))}
 .badge.offline,.badge.not-verified,.badge.waiting-for-operator{color:var(--muted)}
 .mobile-brand .brand-name{font-size:22px}
