@@ -13,12 +13,14 @@ def session_token_hash(token):
     return hashlib.sha256(str(token).encode()).hexdigest()
 
 
-async def save_session(database, *, token, user_id, shop_id, session_id, expires):
+async def save_session(database, *, token, user_id, shop_id, session_id, expires, keep=False, issued=""):
     record = {
         "id": session_id,
         "user_id": user_id,
         "token_hash": session_token_hash(token),
         "expires": expires,
+        "keep": bool(keep),
+        "issued": issued or expires,
     }
     if shop_id:
         with shop_scope(shop_id):

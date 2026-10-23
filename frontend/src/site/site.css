@@ -78,6 +78,14 @@
 }
 .site-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .site-form-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+.site-address { margin-top: -6px; font-size: 14px; }
+.password-field { position: relative; display: block; }
+.password-field input { padding-right: 44px; }
+.password-eye { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); border: 0; background: transparent; color: var(--muted); padding: 6px; }
+.strength { display: block; height: 6px; border-radius: 99px; background: var(--line); margin-top: 8px; overflow: hidden; }
+.strength span { display: block; height: 100%; border-radius: 99px; background: #1d6b4f; }
+.strength[data-score="0"] span, .strength[data-score="1"] span { background: #a15c07; }
+.strength-label { display: block; margin-top: 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
 .site-note { background: #fff5e9; color: #885219; border-radius: 10px; padding: 12px 14px; font-size: 14px; }
 .site-ok { background: #e7f6ef; color: #1d6b4f; border-radius: 10px; padding: 12px 14px; font-size: 14px; }
 .site-draft { font-size: 12px; letter-spacing: 0.12em; font-weight: 700; color: var(--orange); }

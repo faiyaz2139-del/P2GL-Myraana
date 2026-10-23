@@ -53,6 +53,6 @@ def signup_result():
         "workspace": False,
         "message": (
             "Myraana saved your request. A separate shop workspace is not open yet. "
-            "We will set the shop up with you."
+            "We'll email you an invite when your shop is ready."
         ),
     }

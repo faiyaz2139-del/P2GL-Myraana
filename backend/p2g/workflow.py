@@ -205,6 +205,9 @@ async def ensure_collections():
         await db.invites.create_index("token_hash")
         await db.password_resets.create_index("token_hash")
         await db.auth_attempts.create_index("created")
+        await db.passkeys.create_index("credential_id", unique=True)
+        await db.passkey_challenges.create_index("challenge")
+        await db.login_tickets.create_index("token_hash")
         await db.bootstrap.update_one(
             {"_id": "first-run"},
             {"$setOnInsert": {"configured": False, "created": now()}},
@@ -253,7 +256,9 @@ def require_admin(user):
     return user
 
 
-def session_response(request, user):
+def session_response(request, user, keep=True):
+    from p2g.sign_in import cookie_max_age
+
     token = secrets.token_urlsafe(48)
     secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
     cookie = {
@@ -262,17 +267,22 @@ def session_response(request, user):
         "httponly": True,
         "samesite": "strict",
         "secure": secure,
-        "max_age": 43200,
         "path": "/",
     }
+    age = cookie_max_age(keep)
+    if age is not None:
+        cookie["max_age"] = age
     safe = {key: user[key] for key in ("id", "name", "email", "role")}
     if user.get("shop_id"):
         safe["shopId"] = user["shop_id"]
     return token, cookie, safe
 
 
-async def create_session(token, user_id, shop_id=None):
-    expiry = (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat()
+async def create_session(token, user_id, shop_id=None, keep=True):
+    from p2g.sign_in import session_deadline
+
+    issued = now()
+    expiry = session_deadline(issued, keep)
     await save_session(
         db,
         token=token,
@@ -280,15 +290,17 @@ async def create_session(token, user_id, shop_id=None):
         shop_id=shop_id,
         session_id=new_id(),
         expires=expiry,
+        keep=keep,
+        issued=issued,
     )
 
 
-async def issue_session(request, user):
+async def issue_session(request, user, keep=True):
     """Set the same cookie login uses. Invite acceptance goes through here too."""
     if not user or user.get("active") is False:
         raise AppError("This account has been removed from the shop.", 403)
-    token, cookie, safe_user = session_response(request, user)
-    await create_session(token, user["id"], user.get("shop_id"))
+    token, cookie, safe_user = session_response(request, user, keep=keep)
+    await create_session(token, user["id"], user.get("shop_id"), keep=keep)
     return cookie, safe_user
 
 

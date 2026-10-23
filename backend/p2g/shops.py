@@ -5,12 +5,12 @@ from datetime import datetime, timedelta, timezone
 from p2g.account_access import PUBLIC_RESET_ERROR, reset_token_state
 from p2g.core import AppError, db, new_id, now, sha256
 from p2g.mail import MailError, send_email
+from p2g.sign_in import unique_shop_slug
 from p2g.tenancy import (
     current_shop_id,
     invite_role,
     new_shop_records,
     shop_scope,
-    shop_slug,
     starter_recipes,
     starter_settings,
     unscoped,
@@ -64,13 +64,14 @@ async def provision_shop(name, email, password, owner_name=""):
 
 
 async def _unique_slug(name):
-    slug = shop_slug(name)
-    candidate = slug
-    for _ in range(6):
+    taken = []
+    candidate = unique_shop_slug(name, taken)
+    for _ in range(8):
         if not await db.shops.find_one({"slug": candidate}):
             return candidate
-        candidate = f"{slug[:32].rstrip('-')}-{new_id()[:6]}"
-    return f"shop-{new_id()[:8]}"
+        taken.append(candidate)
+        candidate = unique_shop_slug(name, taken)
+    return candidate
 
 
 async def open_shop_from_lead(lead, created_by, link_for=None):
