@@ -481,9 +481,66 @@ class ConnectorSetupTests(unittest.TestCase):
             self.assertIn("Refusing to print", refused["error"])
         self.assertIsNone(fiery.fiery_credentials({"apiKey": "k", "username": "u"}))
         self.assertEqual(
-            fiery.smb_hold_unc("192.168.0.200", "card_PRINT_READY.pdf"),
+            fiery.smb_hold_unc("192.168.0.200", "card_PRINT_READY.pdf", allowed=["192.168.0.200"]),
             "\\\\192.168.0.200\\hold\\card_PRINT_READY.pdf",
         )
+        for bad in (r"\\8.8.8.8\share", r"\\192.168.0.200\print", r"\\192.168.0.200\hold\extra", "8.8.8.8"):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                fiery.smb_hold_unc(bad, "card_PRINT_READY.pdf", allowed=["192.168.0.200"])
+
+    def test_server_address_is_refused_unless_this_computer_found_that_fiery(self):
+        printers = [
+            {"name": "Xerox EX-Li PX300 Server 1.0 US(6B:72:F0)", "address": "192.168.0.200", "isFiery": True},
+            {"name": "Color Printer", "address": "192.168.0.200", "isFiery": True},
+        ]
+        fiery = connector.load_fiery_hold()
+        self.assertEqual(fiery.discovered_fiery_ips(printers), ["192.168.0.200"])
+        downloaded = []
+
+        def request_bytes(*_args, **_kwargs):
+            downloaded.append("pdf")
+            raise AssertionError("pdf")
+
+        result = {"holds": [{
+            "jobId": "job-42",
+            "address": r"\\8.8.8.8\share",
+            "hotFolder": r"\\attacker\share",
+            "filename": "card_PRINT_READY.pdf",
+        }]}
+        with patch.object(connector, "request_bytes", side_effect=request_bytes), \
+             patch.object(connector, "load_fiery_credentials", return_value={}):
+            reports = connector.perform_holds("https://preview.example.com", "token", result, printers=printers)
+        self.assertEqual(downloaded, [])
+        self.assertEqual(len(reports), 1)
+        self.assertIs(reports[0]["ok"], False)
+        self.assertIs(reports[0]["held"], False)
+        self.assertIs(reports[0]["printed"], False)
+        self.assertIn("did not discover", reports[0]["error"])
+        self.assertIn("Nothing was printed", reports[0]["error"])
+
+        submitted = {}
+
+        def submit_hold(**kwargs):
+            submitted.update(kwargs)
+            return {"ok": True, "held": True, "printed": False, "method": "lpr", "error": ""}
+
+        fiery.submit_hold = submit_hold
+        matched = {"holds": [{
+            "jobId": "job-42",
+            "address": r"\\192.168.0.200\hold",
+            "hotFolder": r"\\attacker\share",
+            "filename": "card_PRINT_READY.pdf",
+            "jobName": "RA",
+        }]}
+        with patch.object(connector, "request_bytes", return_value=b"%PDF"), \
+             patch.object(connector, "load_fiery_hold", return_value=fiery), \
+             patch.object(connector, "load_fiery_credentials", return_value={}):
+            accepted = connector.perform_holds("https://preview.example.com", "token", matched, printers=printers)
+        self.assertEqual(accepted[0]["method"], "lpr")
+        self.assertEqual(submitted["address"], "192.168.0.200")
+        self.assertEqual(submitted["printers"], printers)
+        self.assertNotIn("hot_folder", submitted)
+        self.assertNotIn("operator_folder", submitted)
 
 
 def _transport_down(*_args, **_kwargs):
