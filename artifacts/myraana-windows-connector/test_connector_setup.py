@@ -566,6 +566,123 @@ class ConnectorSetupTests(unittest.TestCase):
         self.assertEqual(spawned["env"]["MYRAANA_ENROLL_TOKEN"], token)
         self.assertEqual(spawned["argv"], [dest])
 
+    def test_browser_renames_and_the_trailer_still_carry_the_token(self):
+        token = "Abc_def-0123456789TOKEN"
+        names = [
+            f"MyraanaConnector-Setup-{token}.exe",
+            f"MyraanaConnector-Setup-{token} (1).exe",
+            f"MyraanaConnector-Setup-{token} - Copy.exe",
+            f"MyraanaConnector-Setup-{token}.exe.exe",
+            f"MyraanaConnector-Setup-{token} (1).exe.exe",
+            f"MyraanaConnector-Setup-{token} - Copy (2).exe",
+            f"MyraanaConnector-Setup-{token} (1) - Copy.exe",
+            f"myraanaconnector-setup-{token} (1).EXE",
+            rf"C:\Users\Op\Downloads\MyraanaConnector-Setup-{token} (1).exe",
+        ]
+        for name in names:
+            self.assertEqual(connector.setup_token_from_filename(name), token, name)
+        self.assertEqual(connector.setup_token_from_filename("MyraanaConnector-Setup.exe"), "")
+        self.assertEqual(connector.setup_token_from_filename("MyraanaConnector.exe"), "")
+        self.assertEqual(connector.setup_token_from_filename(f"MyraanaConnector-Setup-{token} (1).txt"), "")
+        self.assertEqual(connector.setup_token_from_filename("short.exe"), "")
+        real = "r" * 32
+        other = "o" * 32
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            renamed = pathlib.Path(folder) / f"MyraanaConnector-Setup-{other} (1).exe"
+            renamed.write_bytes(connector.append_setup_trailer(b"MZ-frozen", real))
+            self.assertEqual(connector.setup_token_from_executable(renamed), real)
+            plain = pathlib.Path(folder) / f"MyraanaConnector-Setup-{token} - Copy.exe"
+            plain.write_bytes(b"MZ-no-trailer")
+            self.assertEqual(connector.setup_token_from_executable(plain), token)
+            self.assertEqual(connector.setup_token_from_trailer(plain), "")
+
+    def test_a_busy_install_is_replaced_after_the_old_connector_stops(self):
+        token = "c" * 32
+        import tempfile
+        source = pathlib.Path(tempfile.mkdtemp()) / f"MyraanaConnector-Setup-{token}.exe"
+        source.write_bytes(b"MZ-setup-exe")
+        calls = {"stopped": 0}
+        spawned = {}
+
+        def replace(src, dest):
+            if calls["stopped"] == 0:
+                raise OSError("The process cannot access the file because it is being used by another process")
+            pathlib.Path(dest).write_bytes(pathlib.Path(src).read_bytes())
+
+        def stopper():
+            calls["stopped"] += 1
+
+        def spawn(argv, env):
+            spawned["argv"] = argv
+            spawned["env"] = env
+
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            dest = connector.handoff_setup(str(source), token, spawn=spawn, stopper=stopper, replace=replace)
+            self.assertEqual(calls["stopped"], 1)
+            self.assertEqual(pathlib.Path(dest).read_bytes(), b"MZ-setup-exe")
+            self.assertEqual(pathlib.Path(dest).name, "MyraanaConnector.exe")
+            self.assertNotIn(token, pathlib.Path(dest).name)
+            self.assertTrue(str(dest).startswith(folder))
+        with patch.object(connector.platform, "system", return_value="Windows"), \
+             patch.object(connector.subprocess, "run") as run:
+            connector.stop_other_connectors()
+        command = run.call_args.args[0]
+        self.assertEqual(command[:4], ["taskkill", "/F", "/IM", "MyraanaConnector.exe"])
+        with patch.object(connector.platform, "system", return_value="Linux"), \
+             patch.object(connector.subprocess, "run") as skipped:
+            connector.stop_other_connectors()
+        skipped.assert_not_called()
+
+    def test_expired_setup_shows_a_window_and_posts_no_secrets(self):
+        token = "e" * 32
+        posted = []
+        shown = []
+        view = connector.present_setup_failure(
+            connector.ENROLL_ERROR,
+            token=token,
+            reason=connector.ENROLL_ERROR,
+            detail=f"password=hunter2 credential=secret token={token}",
+            host="P2GL-2",
+            poster=posted.append,
+            window=shown.append,
+        )
+        self.assertEqual(view["title"], "This setup file has expired")
+        self.assertEqual(view["message"], "This setup file has expired")
+        self.assertEqual(view["actions"], ["Get a new one", "Type pairing code instead", "Copy details"])
+        self.assertEqual(view["connectUrl"], "https://myraana.com/jobs")
+        self.assertEqual(shown[0]["message"], "This setup file has expired")
+        self.assertEqual(posted[0]["host"], "P2GL-2")
+        self.assertEqual(posted[0]["reason"], "This setup file has expired")
+        self.assertEqual(posted[0]["token"], token)
+        self.assertNotIn(token, posted[0]["detail"])
+        self.assertNotIn(token, posted[0]["reason"])
+        self.assertNotIn("hunter2", posted[0]["detail"])
+        self.assertNotIn("secret", posted[0]["detail"])
+        missing = connector.present_setup_failure(
+            connector.EXPIRED_SETUP_TITLE,
+            reason=connector.EXPIRED_SETUP_TITLE,
+            detail="The setup filename and trailer did not contain a token.",
+            host="P2GL-2",
+            poster=posted.append,
+            window=shown.append,
+        )
+        self.assertTrue(missing["expired"])
+        self.assertNotIn("token", posted[-1])
+        copy_error = connector.present_setup_failure(
+            connector.SETUP_COPY_ERROR,
+            token=token,
+            reason=connector.SETUP_COPY_ERROR,
+            detail=rf"C:\Users\Op\Downloads\MyraanaConnector-Setup-{token} (1).exe is in use",
+            host="P2GL-2",
+            poster=posted.append,
+            window=shown.append,
+        )
+        self.assertEqual(copy_error["title"], "Myraana Connector")
+        self.assertIn("Copy details", copy_error["actions"])
+        self.assertNotIn(token, posted[-1]["detail"])
+        self.assertEqual(connector.connect_page_url("https://myraana.com"), "https://myraana.com/jobs")
+
     def test_enrollment_token_redeems_without_a_code(self):
         stop = threading.Event()
         calls = []

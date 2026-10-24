@@ -49,12 +49,14 @@ from p2g.connector_pairing import (
     heartbeat as paired_heartbeat,
     devices as paired_devices,
     hold_pdf,
+    latest_setup_failure,
     list_enrollments,
     note_prepared_route,
     pairings,
     pairing_status,
     proof_for_token,
     queue_automatic_hold,
+    record_setup_diagnostic,
     redeem_enrollment,
     revoke_enrollment,
 )
@@ -985,6 +987,7 @@ async def settings(request: Request):
         "discoveredPrinters": discovered_printers(settings_data, devices),
         "enrollments": await list_enrollments(),
         "automaticMode": automatic_mode(settings_data),
+        "setupFailure": await latest_setup_failure(),
     }
 
 
@@ -1035,6 +1038,12 @@ async def download_connector_setup(request: Request):
 @api.post("/connector-enrollments/redeem")
 async def redeem_connector_enrollment(request: Request):
     return await redeem_enrollment(await request.json())
+
+
+@api.post("/connector-setup-diagnostics")
+async def connector_setup_diagnostic(request: Request):
+    """The connector reports a setup failure. No browser session and no origin check."""
+    return await record_setup_diagnostic(await request.json())
 
 
 @api.post("/connector-enrollments/{enrollment_id}/revoke")

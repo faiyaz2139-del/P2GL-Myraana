@@ -1,12 +1,13 @@
 """One-click connector setup. The token is stored as a hash and used once.
 
-The download is the published connector exe unchanged. The single-use token is
-only in the filename, MyraanaConnector-Setup-<token>.exe. Nothing is appended
-to the file, because a PyInstaller onefile reads its archive from the end.
-SMB paths and hot folders are not part of this file.
+The download is the published connector exe, checked against its SHA-256, with
+a short trailer appended only on the response. The cached file stays clean.
+Chrome and Edge may rename a repeat download, so the token is also read from
+that trailer. SMB paths and hot folders are not part of this file.
 """
 import hashlib
 import os
+import re
 import tempfile
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -21,6 +22,8 @@ ENROLL_WINDOW = timedelta(minutes=10)
 PUBLIC_ENROLL_ERROR = "This setup link is invalid or expired."
 SETUP_PREFIX = "MyraanaConnector-Setup-"
 SETUP_FILENAME = "MyraanaConnector-Setup.exe"
+TRAILER_MAGIC = b"MYRAANA1"
+DIAGNOSTIC_LIMIT = 8
 PREVIEW_EXE_URL = (
     "https://github.com/faiyaz2139-del/P2GL-Myraana/releases/download/"
     "windows-connector-preview/MyraanaConnector.exe"
@@ -149,29 +152,85 @@ def _token_ok(token):
 
 
 def setup_filename(token):
-    """Filename that carries the token. The exe bytes do not."""
+    """Filename that carries the token. The response also appends a trailer."""
     text = str(token or "").strip()
     if not _token_ok(text):
         raise ValueError("Enrollment token is missing.")
     return f"{SETUP_PREFIX}{text}.exe"
 
 
+def _download_stem(name):
+    """Drop duplicate .exe suffixes and browser copy markers such as ' (1)'."""
+    base = os.path.basename(str(name or "").replace("\\", "/")).strip()
+    if not base or len(base) > 400 or not base.lower().endswith(".exe"):
+        return ""
+    stem = base
+    for _ in range(8):
+        while stem.lower().endswith(".exe"):
+            stem = stem[:-4]
+        updated = stem
+        while True:
+            copied = re.sub(r"(?i)\s+-\s+copy$", "", updated)
+            numbered = re.sub(r"\s+\(\d+\)$", "", copied)
+            if numbered == updated:
+                break
+            updated = numbered
+        if updated == stem:
+            return stem
+        stem = updated
+    return stem
+
+
 def setup_token_from_filename(name):
-    """Read the token back from a setup download name. A bare exe has none."""
-    base = os.path.basename(str(name or "").replace("\\", "/"))
-    if len(base) > 240:
-        return ""
+    """Read the token from a setup download name, including browser renames."""
+    stem = _download_stem(name)
     prefix = SETUP_PREFIX
-    if not base.lower().startswith(prefix.lower()) or not base.lower().endswith(".exe"):
+    if not stem.lower().startswith(prefix.lower()):
         return ""
-    token = base[len(prefix):-4]
+    token = stem[len(prefix):]
     return token if _token_ok(token) else ""
 
 
-def enrollment_download(package_bytes, token):
-    """Return the published exe unchanged, named with the one-time token."""
+def append_setup_trailer(payload, token):
+    """Magic, token, then the token length. The published exe bytes stay first."""
+    text = str(token or "").strip()
+    if not _token_ok(text):
+        raise ValueError("Enrollment token is missing.")
+    encoded = text.encode("ascii")
+    return bytes(payload or b"") + TRAILER_MAGIC + encoded + len(encoded).to_bytes(4, "big")
+
+
+def setup_token_from_trailer_bytes(payload):
+    """Read a trailer from the end of an exe. A clean published exe has none."""
+    data = bytes(payload or b"")
+    if len(data) < len(TRAILER_MAGIC) + 20 + 4:
+        return ""
+    length = int.from_bytes(data[-4:], "big")
+    if not 20 <= length <= 200:
+        return ""
+    end = len(data) - 4
+    start = end - length
+    magic_at = start - len(TRAILER_MAGIC)
+    if magic_at < 0 or data[magic_at:start] != TRAILER_MAGIC:
+        return ""
+    try:
+        token = data[start:end].decode("ascii")
+    except UnicodeDecodeError:
+        return ""
+    return token if _token_ok(token) else ""
+
+
+def enrollment_download(package_bytes, token, expected_sha256=None):
+    """Append the trailer only after the base exe matches its SHA-256.
+
+    A local package has no published digest, so expected_sha256 is omitted
+    and the trailer is still appended to the bytes that were read. The cached
+    file is not modified; the trailer exists only on the returned bytes.
+    """
     payload = bytes(package_bytes or b"")
-    return payload, setup_filename(token)
+    if expected_sha256 is not None and not verify_sha256(payload, expected_sha256):
+        raise PackageUnavailable("The published connector did not match its checksum.")
+    return append_setup_trailer(payload, token), setup_filename(token)
 
 
 def enrollment_config(website, token, shop_id):
@@ -363,6 +422,71 @@ def connector_package_bytes(env, cache_dir, fetcher, now):
     if path:
         return local_connector_package(path)
     return published_connector_package(cache_dir, fetcher, now)
+
+
+def published_package_digest(cache_dir=None, env=None):
+    """SHA-256 stored when the preview exe was verified. A local file has none."""
+    env = os.environ if env is None else env
+    if str(env.get("CONNECTOR_PACKAGE_PATH") or "").strip():
+        return ""
+    _payload, digest, _checked = _read_verified_cache(cache_dir or connector_cache_dir(env))
+    return digest or ""
+
+
+def scrub_setup_text(value, token=""):
+    """Drop the enrollment token and anything that looks like a saved secret."""
+    text = str(value or "")
+    secret = str(token or "").strip()
+    if secret:
+        text = text.replace(secret, "[redacted]")
+    return re.sub(
+        r"(?i)(password|credential|claimsecret|api[_-]?key|token)\s*[:=]\s*\S+",
+        lambda match: match.group(1) + "=[redacted]",
+        text,
+    )
+
+
+def prepare_setup_diagnostic(payload, enrollment, recent_count, at):
+    """A shop-scoped failure row, or None when the token is unknown or limited.
+
+    The public response stays the same either way. The row never stores the token.
+    """
+    token = str((payload or {}).get("token") or "").strip()
+    host = scrub_setup_text((payload or {}).get("host"), token).strip()[:120]
+    reason = scrub_setup_text((payload or {}).get("reason"), token).strip()[:180]
+    detail = scrub_setup_text((payload or {}).get("detail"), token).strip()[:2000]
+    if not host:
+        host = "Windows computer"
+    if not reason:
+        reason = "Setup failed."
+    if token and (token in host or token in reason or token in detail):
+        return None
+    if not enrollment or not enrollment.get("shop_id"):
+        return None
+    if int(recent_count or 0) >= DIAGNOSTIC_LIMIT:
+        return None
+    return {
+        "host": host,
+        "reason": reason,
+        "detail": detail,
+        "created_at": str(at or ""),
+        "shop_id": enrollment.get("shop_id"),
+    }
+
+
+def public_setup_failure(row):
+    """Host, reason, and time. Detail and the token stay off the settings page."""
+    if not row:
+        return None
+    host = str(row.get("host") or "").strip()[:120]
+    reason = str(row.get("reason") or "").strip()[:180]
+    if not host or not reason:
+        return None
+    return {
+        "host": host,
+        "reason": reason,
+        "created": str(row.get("created_at") or row.get("created") or ""),
+    }
 
 
 def verify_sha256(payload, expected):
