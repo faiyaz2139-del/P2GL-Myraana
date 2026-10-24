@@ -629,10 +629,44 @@ class ConnectorSetupTests(unittest.TestCase):
             connector.stop_other_connectors()
         command = run.call_args.args[0]
         self.assertEqual(command[:4], ["taskkill", "/F", "/IM", "MyraanaConnector.exe"])
+        self.assertEqual(run.call_args.kwargs["creationflags"], 0x08000000)
         with patch.object(connector.platform, "system", return_value="Linux"), \
              patch.object(connector.subprocess, "run") as skipped:
             connector.stop_other_connectors()
         skipped.assert_not_called()
+
+    def test_windows_children_never_open_a_console_window(self):
+        discovery = connector.load_discovery()
+
+        class FakeStartupInfo:
+            def __init__(self):
+                self.dwFlags = 0
+                self.wShowWindow = 1
+
+        completed = type("Completed", (), {"stdout": "[]"})()
+        with patch.object(connector.platform, "system", return_value="Windows"), \
+             patch.object(discovery.subprocess, "STARTUPINFO", FakeStartupInfo, create=True), \
+             patch.object(discovery.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(discovery.os_queues(), [])
+            connector.stop_other_connectors()
+        self.assertEqual(run.call_count, 2)
+        for call in run.call_args_list:
+            self.assertIn(call.args[0][0], ("powershell", "taskkill"))
+            self.assertEqual(call.kwargs["creationflags"] & 0x08000000, 0x08000000)
+            self.assertEqual(call.kwargs["stdin"], connector.subprocess.DEVNULL)
+            info = call.kwargs["startupinfo"]
+            self.assertTrue(info.dwFlags & 0x00000001)
+            self.assertEqual(info.wShowWindow, 0)
+        with patch.object(connector.platform, "system", return_value="Linux"):
+            self.assertEqual(discovery.hidden_window_kwargs(), {})
+            self.assertEqual(connector.hidden_window_kwargs(), {})
+
+    def test_installed_connector_relaunches_without_a_console(self):
+        with patch.object(connector.platform, "system", return_value="Windows"), \
+             patch.object(connector.subprocess, "DETACHED_PROCESS", 0x00000008, create=True), \
+             patch.object(connector.subprocess, "Popen") as popen:
+            connector.spawn_detached(["MyraanaConnector.exe"], {})
+        self.assertTrue(popen.call_args.kwargs["creationflags"] & 0x00000008)
 
     def test_expired_setup_shows_a_window_and_posts_no_secrets(self):
         token = "e" * 32

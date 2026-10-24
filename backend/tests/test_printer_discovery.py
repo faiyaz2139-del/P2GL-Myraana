@@ -12,6 +12,7 @@ from p2g.printer_discovery import (
     discover,
     encode_name,
     fiery_api_url,
+    hidden_window_kwargs,
     looks_like_fiery,
     normalise_reported,
     os_queues,
@@ -275,3 +276,18 @@ def test_connector_ships_the_same_discovery_module():
     original = (root / "backend" / "p2g" / "printer_discovery.py").read_text(encoding="utf-8")
     shipped = (root / "frontend" / "public" / "setup" / "printer_discovery.py").read_text(encoding="utf-8")
     assert original == shipped
+
+
+def test_windows_get_printer_runs_powershell_without_a_console_window():
+    from unittest.mock import patch
+    import p2g.printer_discovery as discovery
+
+    completed = type("Completed", (), {"stdout": "[]"})()
+    with patch.object(discovery.platform, "system", return_value="Windows"), \
+         patch.object(discovery.subprocess, "run", return_value=completed) as run:
+        assert discovery.os_queues() == []
+    assert run.call_args.args[0][0] == "powershell"
+    assert run.call_args.kwargs["creationflags"] & 0x08000000
+    assert run.call_args.kwargs["stdin"] == discovery.subprocess.DEVNULL
+    assert hidden_window_kwargs(system="Linux") == {}
+    assert hidden_window_kwargs(system="Windows")["creationflags"] & 0x08000000

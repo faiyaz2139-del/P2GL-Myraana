@@ -627,14 +627,37 @@ _GET_PRINTER = (
 )
 
 
+# The connector exe is a windowed app, so a console child such as PowerShell
+# or taskkill would open its own black window. These values hide it.
+CREATE_NO_WINDOW = 0x08000000
+STARTF_USESHOWWINDOW = 0x00000001
+SW_HIDE = 0
+
+
+def hidden_window_kwargs(system=None):
+    """subprocess keyword arguments that keep a child's console window hidden on Windows."""
+    if (system or platform.system()) != "Windows":
+        return {}
+    kwargs = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", CREATE_NO_WINDOW)}
+    startupinfo_type = getattr(subprocess, "STARTUPINFO", None)
+    if startupinfo_type is not None:
+        info = startupinfo_type()
+        info.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", STARTF_USESHOWWINDOW)
+        info.wShowWindow = SW_HIDE
+        kwargs["startupinfo"] = info
+    return kwargs
+
+
 def _run(args):
     try:
         completed = subprocess.run(
             args,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=5,
             check=False,
+            **hidden_window_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""
