@@ -33,9 +33,11 @@ from p2g.connector_auth import (
     shop_for_connected_pairing,
 )
 from p2g.connector_enroll import (
+    DIAGNOSTIC_LIMIT,
     ENROLL_WINDOW,
     PUBLIC_ENROLL_ERROR,
     PackageUnavailable,
+    _token_ok,
     build_enrollment,
     choose_device,
     connector_cache_dir,
@@ -45,8 +47,11 @@ from p2g.connector_enroll import (
     enrollment_state,
     enrollment_website,
     fetch_https,
+    prepare_setup_diagnostic,
     public_enrollment,
+    public_setup_failure,
     published_connector_update,
+    published_package_digest,
 )
 from p2g.core import AppError, db, new_id, now
 from p2g.fiery_hold import hold_method_label, interpret_hold_report, job_label
@@ -332,6 +337,7 @@ async def heartbeat(request, payload):
                 settings = {**settings, **fields}
         await _record_holds(payload.get("holds"), settings)
         holds = await _pending_holds(settings, inventory, device.get("_id"))
+        await clear_setup_failures()
     result = {"ok": True, "status": "Connected", "scan": due, "holds": holds}
     manifest = published_connector_update()
     if manifest:
@@ -390,7 +396,13 @@ async def create_enrollment_package(user, website_candidates):
             raise AppError("Sign in to your shop.", 401)
         document["website"] = website
         await db.connector_enrollments.insert_one(document)
-    return enrollment_download(content, token)
+    local = str(os.environ.get("CONNECTOR_PACKAGE_PATH") or "").strip()
+    if local:
+        return enrollment_download(content, token)
+    digest = published_package_digest()
+    if not digest:
+        raise AppError("The published connector did not match its checksum.", 503)
+    return enrollment_download(content, token, expected_sha256=digest)
 
 
 async def revoke_enrollment(enrollment_id, user):
@@ -407,6 +419,44 @@ async def revoke_enrollment(enrollment_id, user):
     if not result.modified_count:
         raise AppError("That setup download is no longer open.", 409)
     return {"ok": True}
+
+
+async def record_setup_diagnostic(payload):
+    """Store one setup failure for the shop that owns this token.
+
+    An unknown, missing, or over-limit token gets the same public response and
+    is not stored. The row has no token and no credential.
+    """
+    token = str((payload or {}).get("token") or "").strip()
+    enrollment = None
+    if _token_ok(token):
+        digest = credential_hash(token)
+        with unscoped():
+            enrollment = await db.connector_enrollments.find_one({"token_hash": digest})
+        if not enrollment or not hmac.compare_digest(str(enrollment.get("token_hash") or ""), digest):
+            enrollment = None
+    if enrollment and enrollment.get("shop_id"):
+        created = now()
+        cutoff = (datetime.now(timezone.utc) - ENROLL_WINDOW).isoformat()
+        with shop_scope(enrollment["shop_id"]):
+            recent = await db.setup_diagnostics.find(
+                {"created_at": {"$gt": cutoff}}, {"_id": 1},
+            ).to_list(DIAGNOSTIC_LIMIT + 1)
+            document = prepare_setup_diagnostic(payload, enrollment, len(recent), created)
+            if document:
+                document["_id"] = new_id()
+                await db.setup_diagnostics.insert_one(document)
+    return {"ok": True}
+
+
+async def latest_setup_failure():
+    rows = await db.setup_diagnostics.find({}, {"detail": 0}).to_list(20)
+    rows.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return public_setup_failure(rows[0] if rows else None)
+
+
+async def clear_setup_failures():
+    await db.setup_diagnostics.delete_many({})
 
 
 async def list_enrollments():

@@ -17,6 +17,8 @@ img.brand-mark{width:40px;height:40px;border-radius:11px;background:transparent;
 .connect-banner .text-button{color:#d5e2ff}
 .connect-banner .primary{background:#fff;color:#12315c;border-color:#fff}
 .connect-banner.ready{background:#e5f6ee;color:#145c3e;font-size:18px;font-weight:650}
+.connect-banner.failed{align-items:flex-start}
+.connect-banner .setup-failure{margin:8px 0 0;color:#ffe7a3;font-size:16px}
 .download-hint{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:#12315c;color:#fff;padding:16px 22px;border-radius:14px;z-index:80;text-align:center;box-shadow:var(--shadow)}
 .download-arrow{display:block;font-size:32px;line-height:1;margin-top:4px}
 .job-timeline{list-style:none;padding:0;margin:8px 0 16px;display:grid;gap:8px}

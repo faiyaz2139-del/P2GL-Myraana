@@ -81,6 +81,27 @@ jobs:
           if (-not (Test-Path $exe)) { throw "Connector executable missing" }
           python -c "import subprocess,sys; p=subprocess.run([sys.argv[1],'--self-test'],capture_output=True,text=True,timeout=90); print(p.stdout+p.stderr); assert p.returncode == 0, 'Frozen connector failed to import discovery and fiery_hold'" "$exe"
 
+      - name: Smoke-test onefile with an appended setup trailer
+        run: |
+          $exe = Join-Path $env:CONNECTOR_DIR "dist\MyraanaConnector.exe"
+          if (-not (Test-Path $exe)) { throw "Connector executable missing" }
+          $copy = Join-Path $env:RUNNER_TEMP "MyraanaConnector-trailer.exe"
+          Copy-Item $exe $copy
+          $token = "setup-token-value-0123456789"
+          $magic = [System.Text.Encoding]::ASCII.GetBytes("MYRAANA1")
+          $tokenBytes = [System.Text.Encoding]::ASCII.GetBytes($token)
+          $length = [System.BitConverter]::GetBytes([uint32]$tokenBytes.Length)
+          if ([System.BitConverter]::IsLittleEndian) { [Array]::Reverse($length) }
+          $stream = [System.IO.File]::Open($copy, [System.IO.FileMode]::Append)
+          try {
+            $stream.Write($magic, 0, $magic.Length)
+            $stream.Write($tokenBytes, 0, $tokenBytes.Length)
+            $stream.Write($length, 0, $length.Length)
+          } finally {
+            $stream.Close()
+          }
+          python -c "import subprocess,sys; p=subprocess.run([sys.argv[1],'--self-test'],capture_output=True,text=True,timeout=90); print(p.stdout+p.stderr); assert p.returncode == 0, 'Frozen connector failed after an appended setup trailer'" "$copy"
+
       - name: Upload unsigned preview installer
         uses: actions/upload-artifact@v4
         with:

@@ -25,6 +25,7 @@ TENANT_COLLECTIONS = frozenset({
     "connector_pairings",
     "connector_devices",
     "connector_enrollments",
+    "setup_diagnostics",
     "connector_state",
     "proof_links",
     "executions",

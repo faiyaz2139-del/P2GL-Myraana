@@ -10,6 +10,7 @@ import hashlib
 import importlib.util
 import json
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -56,6 +57,9 @@ INSTALL_EXE_NAME = "MyraanaConnector.exe"
 MISSING_SETUP_MESSAGE = "Download Connect this computer again. Open that file. Do not rename it."
 UPDATE_INTERVAL_SECONDS = 24 * 60 * 60
 ENROLL_ERROR = "This setup link is invalid or expired."
+TRAILER_MAGIC = b"MYRAANA1"
+EXPIRED_SETUP_TITLE = "This setup file has expired"
+SETUP_COPY_ERROR = "The connector could not replace the installed copy."
 
 
 def load_state():
@@ -481,29 +485,135 @@ def _token_ok(token):
     return all(char.isalnum() or char in "-_" for char in text)
 
 
+def _download_stem(name):
+    """Drop duplicate .exe suffixes and browser copy markers such as ' (1)'."""
+    base = os.path.basename(str(name or "").replace("\\", "/")).strip()
+    if not base or len(base) > 400 or not base.lower().endswith(".exe"):
+        return ""
+    stem = base
+    for _ in range(8):
+        while stem.lower().endswith(".exe"):
+            stem = stem[:-4]
+        updated = stem
+        while True:
+            copied = re.sub(r"(?i)\s+-\s+copy$", "", updated)
+            numbered = re.sub(r"\s+\(\d+\)$", "", copied)
+            if numbered == updated:
+                break
+            updated = numbered
+        if updated == stem:
+            return stem
+        stem = updated
+    return stem
+
+
 def setup_token_from_filename(name):
     """The setup download carries the token in its name. The installed exe does not."""
-    base = os.path.basename(str(name or "").replace("\\", "/"))
+    stem = _download_stem(name)
     prefix = SETUP_PREFIX
-    if not base.lower().startswith(prefix.lower()) or not base.lower().endswith(".exe"):
+    if not stem.lower().startswith(prefix.lower()):
         return ""
-    token = base[len(prefix):-4]
+    token = stem[len(prefix):]
     return token if _token_ok(token) else ""
 
 
-def copy_into_install(source, dest=None):
-    """Install beside the connector state. The copy is named without the token."""
+def append_setup_trailer(payload, token):
+    """Magic, token, then the token length. Tests and the server use the same layout."""
+    text = str(token or "").strip()
+    if not _token_ok(text):
+        raise ValueError("Enrollment token is missing.")
+    encoded = text.encode("ascii")
+    return bytes(payload or b"") + TRAILER_MAGIC + encoded + len(encoded).to_bytes(4, "big")
+
+
+def setup_token_from_trailer_bytes(payload):
+    data = bytes(payload or b"")
+    if len(data) < len(TRAILER_MAGIC) + 20 + 4:
+        return ""
+    length = int.from_bytes(data[-4:], "big")
+    if not 20 <= length <= 200:
+        return ""
+    end = len(data) - 4
+    start = end - length
+    magic_at = start - len(TRAILER_MAGIC)
+    if magic_at < 0 or data[magic_at:start] != TRAILER_MAGIC:
+        return ""
+    try:
+        token = data[start:end].decode("ascii")
+    except UnicodeDecodeError:
+        return ""
+    return token if _token_ok(token) else ""
+
+
+def setup_token_from_trailer(path):
+    """Read only the tail. A renamed download still carries the token here."""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            tail = min(size, len(TRAILER_MAGIC) + 200 + 4)
+            if tail < len(TRAILER_MAGIC) + 20 + 4:
+                return ""
+            handle.seek(size - tail)
+            return setup_token_from_trailer_bytes(handle.read(tail))
+    except OSError:
+        return ""
+
+
+def setup_token_from_executable(path):
+    """The trailer wins. The filename is the fallback when no trailer is present."""
+    token = setup_token_from_trailer(path)
+    if token:
+        return token
+    return setup_token_from_filename(path)
+
+
+def stop_other_connectors():
+    """Stop an installed MyraanaConnector.exe so this setup can replace it.
+
+    The setup download is named MyraanaConnector-Setup-<token>.exe, so this
+    does not stop the setup process itself. Other platforms do nothing.
+    """
+    if platform.system() != "Windows":
+        return
+    creation = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    subprocess.run(
+        ["taskkill", "/F", "/IM", INSTALL_EXE_NAME],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=creation,
+        check=False,
+    )
+
+
+def copy_into_install(source, dest=None, replace=None, stopper=None):
+    """Install beside the connector state. The copy is named without the token.
+
+    When the installed file is in use, stop the older connector and copy again.
+    """
     dest = dest or installed_exe()
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     if os.path.normcase(os.path.abspath(source)) == os.path.normcase(os.path.abspath(dest)):
         return dest
-    shutil.copyfile(source, dest)
+    writer = replace or shutil.copyfile
+
+    def _write():
+        writer(source, dest)
+
+    try:
+        _write()
+    except OSError:
+        if stopper is None:
+            stop_other_connectors()
+        else:
+            stopper()
+        _write()
     return dest
 
 
-def handoff_setup(source, token, dest=None, spawn=None):
+def handoff_setup(source, token, dest=None, spawn=None, stopper=None, replace=None):
     """Copy this file into LocalAppData and start that copy once with the token."""
-    dest = copy_into_install(source, dest)
+    dest = copy_into_install(source, dest, replace=replace, stopper=stopper)
     env = os.environ.copy()
     if token:
         env["MYRAANA_ENROLL_TOKEN"] = token
@@ -813,6 +923,150 @@ def run(url=None, code=None, report=print, stop=None, scan_now=None):
             stop.wait(8)
 
 
+def scrub_setup_text(value, token=""):
+    """The diagnostic and the window must not repeat the token or a password."""
+    text = str(value or "")
+    secret = str(token or "").strip()
+    if secret:
+        text = text.replace(secret, "[redacted]")
+    return re.sub(
+        r"(?i)(password|credential|claimsecret|api[_-]?key|token)\s*[:=]\s*\S+",
+        lambda match: match.group(1) + "=[redacted]",
+        text,
+    )
+
+
+def connect_page_url(website=None):
+    """The myraana.com page that shows Connect this computer."""
+    try:
+        origin = website_url(str(website or DEFAULT_WEBSITE))
+    except Exception:
+        origin = DEFAULT_WEBSITE
+    return origin + "/jobs"
+
+
+def _hostname():
+    try:
+        return (socket.gethostname() or "Windows computer")[:120]
+    except Exception:
+        return "Windows computer"
+
+
+def setup_failure_view(message, *, token="", reason="", detail="", website=None, host=""):
+    """Visible setup failure. Missing, expired, and used tokens share one window."""
+    text = str(message or "")
+    cause = str(reason or text)
+    expired = cause in {EXPIRED_SETUP_TITLE, ENROLL_ERROR, MISSING_SETUP_MESSAGE} or "expired" in cause.lower()
+    shown = EXPIRED_SETUP_TITLE if expired else (text or "Setup could not finish.")
+    safe_reason = EXPIRED_SETUP_TITLE if expired else (scrub_setup_text(cause, token).strip()[:180] or shown)
+    safe_detail = scrub_setup_text(detail or text or shown, token).strip()[:2000]
+    if token and token in safe_detail:
+        safe_detail = safe_detail.replace(token, "[redacted]")
+    if token and token in safe_reason:
+        safe_reason = safe_reason.replace(token, "[redacted]")
+    return {
+        "expired": expired,
+        "title": EXPIRED_SETUP_TITLE if expired else "Myraana Connector",
+        "message": shown,
+        "reason": safe_reason,
+        "detail": safe_detail or shown,
+        "host": (host or _hostname())[:120],
+        "actions": ["Get a new one", "Type pairing code instead", "Copy details"],
+        "connectUrl": connect_page_url(website),
+        "token": token if _token_ok(token) else "",
+    }
+
+
+def diagnostic_body(view):
+    body = {
+        "host": view["host"],
+        "reason": view["reason"],
+        "detail": view["detail"],
+    }
+    if view.get("token"):
+        body["token"] = view["token"]
+    return body
+
+
+def post_setup_diagnostic(website, body):
+    try:
+        origin = website_url(str(website or DEFAULT_WEBSITE))
+    except Exception:
+        origin = DEFAULT_WEBSITE
+    url = origin + "/api/connector-setup-diagnostics"
+    data = json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json", "User-Agent": "MyraanaConnector"},
+    )
+    with urllib.request.urlopen(request, timeout=8) as response:
+        response.read()
+
+
+def open_connect_page(url=None):
+    import webbrowser
+    webbrowser.open(url or connect_page_url())
+
+
+def _tk_failure_window(view, opener=None, copier=None, show_pairing=None):
+    import tkinter as tk
+    from tkinter import ttk
+    root = tk.Tk()
+    root.title(view["title"])
+    root.geometry("460x240")
+    frame = ttk.Frame(root, padding=24)
+    frame.pack(fill="both", expand=True)
+    ttk.Label(frame, text=view["message"], wraplength=400).pack(anchor="w")
+
+    def get_new():
+        (opener or open_connect_page)(view["connectUrl"])
+
+    def type_code():
+        root.destroy()
+        os.environ.pop("MYRAANA_ENROLL_TOKEN", None)
+        if show_pairing:
+            show_pairing()
+        else:
+            setup_window()
+
+    def copy_details():
+        text = view.get("detail") or view["message"]
+        if copier:
+            copier(text)
+            return
+        root.clipboard_clear()
+        root.clipboard_append(text)
+
+    ttk.Button(frame, text="Get a new one", command=get_new).pack(anchor="w", pady=(16, 0))
+    ttk.Button(frame, text="Type pairing code instead", command=type_code).pack(anchor="w", pady=(8, 0))
+    ttk.Button(frame, text="Copy details", command=copy_details).pack(anchor="w", pady=(8, 0))
+    root.mainloop()
+
+
+def present_setup_failure(
+    message, *, token="", reason="", detail="", website=None, host=None,
+    poster=None, window=None, opener=None, copier=None, show_pairing=None,
+):
+    """Show the failure and post a diagnostic that does not contain the token."""
+    view = setup_failure_view(
+        message, token=token, reason=reason, detail=detail, website=website, host=host or "",
+    )
+    body = diagnostic_body(view)
+    try:
+        if poster:
+            poster(body)
+        else:
+            post_setup_diagnostic(website, body)
+    except Exception:
+        pass
+    if window is not None:
+        window(view)
+        return view
+    _tk_failure_window(view, opener=opener, copier=copier, show_pairing=show_pairing)
+    return view
+
+
 def _notice_window(message):
     import tkinter as tk
     from tkinter import ttk
@@ -835,6 +1089,7 @@ def enroll_quietly():
     stop = threading.Event()
     icon = {"current": None}
     scan_now = threading.Event()
+    failure = {}
 
     def work():
         try:
@@ -851,6 +1106,15 @@ def enroll_quietly():
                 kind, message = events.get_nowait()
                 if message == TOAST_MESSAGE:
                     show_toast(root, TOAST_MESSAGE)
+                if kind == "error":
+                    try:
+                        failure["website"] = load_state().get("websiteUrl") or ""
+                    except Exception:
+                        failure["website"] = ""
+                    failure["message"] = message
+                    failure["token"] = os.environ.pop("MYRAANA_ENROLL_TOKEN", "")
+                    root.destroy()
+                    return
                 if kind == "done":
                     return
         except queue.Empty:
@@ -881,6 +1145,14 @@ def enroll_quietly():
     threading.Thread(target=work, name="myraana-enroll", daemon=True).start()
     poll()
     root.mainloop()
+    if failure.get("message"):
+        present_setup_failure(
+            failure["message"],
+            token=failure.get("token") or "",
+            reason=failure["message"],
+            detail=failure["message"],
+            website=failure.get("website") or "",
+        )
 
 
 def setup_window(self_test=False, notice=""):
@@ -1057,11 +1329,24 @@ def main(argv=None):
     if running_from_install():
         apply_staged_update()
     if getattr(sys, "frozen", False) and not running_from_install():
-        token = setup_token_from_filename(sys.executable)
+        token = setup_token_from_executable(sys.executable)
         if not token:
-            setup_window(notice=MISSING_SETUP_MESSAGE)
+            present_setup_failure(
+                EXPIRED_SETUP_TITLE,
+                reason=EXPIRED_SETUP_TITLE,
+                detail="The setup filename and trailer did not contain a token.",
+            )
             return 0
-        handoff_setup(sys.executable, token)
+        try:
+            handoff_setup(sys.executable, token)
+        except Exception as error:
+            present_setup_failure(
+                SETUP_COPY_ERROR,
+                token=token,
+                reason=SETUP_COPY_ERROR,
+                detail=str(error),
+            )
+            return 0
         return 0
     if args.console:
         run()

@@ -1426,6 +1426,15 @@ function Settings({ settings, user, reload }) {
       setPairingMessage(reason?.message || "The pairing code could not be created.");
     }
   };
+  const retrySetup = async () => {
+    setPairingMessage("");
+    try {
+      await downloadConnectorSetup();
+      setPairingMessage("Open the file that just downloaded. That's it.");
+    } catch (reason) {
+      setPairingMessage(reason.message || "The setup file could not be downloaded.");
+    }
+  };
   approveRef.current = approve;
   useEffect(() => {
     if (user.role !== "admin" || !openPairing?.id) return undefined;
@@ -1496,6 +1505,7 @@ function Settings({ settings, user, reload }) {
       <DiscoveredPrinters settings={settings} user={user} reload={reload} />
       <section className="settings-card">
         <div className="section-heading"><h3>Connect shop</h3><Link2 /></div>
+        {settings.setupFailure?.host && settings.setupFailure?.reason && <p className="notice warning" data-testid="settings-setup-failure">Setup on {settings.setupFailure.host} failed: {settings.setupFailure.reason}{(user.role === "admin" || user.role === "operator") && <button type="button" className="button" data-testid="settings-setup-retry" onClick={retrySetup}>Fix and retry</button>}</p>}
         <p data-testid="connector-status">{online ? "The shop connector is connected. It reports printers on this network, and Scan again asks it to look now." : offlineDevices.length ? offlineDevices.map(connectorTrayHint).join(" ") : "This computer is not connected. Use Connect this computer at the top of the page. Other ways to connect stays available for a pairing code."}</p>
         <p data-testid="connector-shop-note">Each shop pairs its own Windows Connector from this page. The pairing code belongs to this shop only.</p>
         {settings.legacyConnector && <a className="button" href="/setup/print2go-connector.py" download data-testid="download-connector-link"><Download size={16} />Download Print2Go legacy connector</a>}
@@ -1876,16 +1886,21 @@ function PasskeyOffer() {
 
 function ConnectComputerBanner({ settings, user, pending, hint, onConnect, onOther }) {
   const state = connectBannerState(settings, user, pending);
+  const failure = settings?.setupFailure;
+  const failed = Boolean(failure?.host && failure?.reason);
   if (!state) return null;
-  if (state.kind === "ready") {
+  if (state.kind === "ready" && !failed) {
     return <div className="connect-banner ready" data-testid="connect-this-computer-ready">This computer is connected · Fiery {state.fiery} ready</div>;
   }
-  return <div className="connect-banner" data-testid="connect-this-computer-banner">
+  return <div className={failed ? "connect-banner failed" : "connect-banner"} data-testid="connect-this-computer-banner">
     <div>
       <h2>Connect this computer to your printers</h2>
+      {failed && <p className="setup-failure" data-testid="setup-failure-banner">Setup on {failure.host} failed: {failure.reason}</p>}
       <button type="button" className="text-button" data-testid="banner-other-ways" onClick={onOther}>Other ways to connect</button>
     </div>
-    <button type="button" className="primary" data-testid="connect-this-computer-button" onClick={onConnect}>Connect this computer</button>
+    {failed
+      ? <button type="button" className="primary" data-testid="setup-failure-retry" onClick={onConnect}>Fix and retry</button>
+      : <button type="button" className="primary" data-testid="connect-this-computer-button" onClick={onConnect}>Connect this computer</button>}
     {hint && <p className="download-hint" data-testid="connect-download-hint">Open the file that just downloaded. That's it.<span className="download-arrow" aria-hidden="true">↓</span></p>}
   </div>;
 }

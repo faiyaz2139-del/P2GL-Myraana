@@ -1,4 +1,4 @@
-"""Setup download: one exe, token only in the filename, hashed on the server."""
+"""Setup download: verified exe plus a token trailer, hashed on the server."""
 import hashlib
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -6,11 +6,13 @@ from pathlib import Path
 
 from p2g.connector_auth import credential_hash
 from p2g.connector_enroll import (
+    DIAGNOSTIC_LIMIT,
     ENROLL_MINUTES,
     PREVIEW_EXE_URL,
     PREVIEW_SHA_URL,
     PUBLIC_ENROLL_ERROR,
     SETUP_PREFIX,
+    TRAILER_MAGIC,
     PackageUnavailable,
     build_enrollment,
     choose_device,
@@ -20,11 +22,14 @@ from p2g.connector_enroll import (
     enrollment_rate_limited,
     enrollment_state,
     fetch_https,
+    prepare_setup_diagnostic,
     public_enrollment,
+    public_setup_failure,
     published_connector_package,
     published_connector_update,
     setup_filename,
     setup_token_from_filename,
+    setup_token_from_trailer_bytes,
     verify_sha256,
 )
 
@@ -71,14 +76,25 @@ def test_one_computer_is_reused_and_the_download_is_the_same_exe():
     assert choose_device(only, "device-1") == ("device-1", "rotate")
     assert choose_device([{"_id": "a", "enabled": True}, {"_id": "b", "enabled": True}], "device-new") == ("device-new", "create")
     payload = b"MZ-published-connector"
-    body, filename = enrollment_download(payload, TOKEN)
-    assert body == payload
-    assert TOKEN.encode() not in body
+    digest = hashlib.sha256(payload).hexdigest()
+    body, filename = enrollment_download(payload, TOKEN, expected_sha256=digest)
+    assert body.startswith(payload)
+    assert hashlib.sha256(body[:len(payload)]).hexdigest() == digest
+    assert TOKEN.encode() not in body[:len(payload)]
+    assert setup_token_from_trailer_bytes(body) == TOKEN
+    assert body.endswith(len(TOKEN.encode()).to_bytes(4, "big"))
+    assert TRAILER_MAGIC in body[len(payload):]
     assert filename == f"{SETUP_PREFIX}{TOKEN}.exe"
     assert setup_token_from_filename(filename) == TOKEN
     assert setup_token_from_filename(r"C:\Users\Op\Downloads\\" + filename) == TOKEN
     assert setup_token_from_filename("MyraanaConnector-Setup.exe") == ""
     assert setup_filename(TOKEN) == filename
+    try:
+        enrollment_download(payload, TOKEN, expected_sha256="ab" * 32)
+    except PackageUnavailable as error:
+        assert error.message == "The published connector did not match its checksum."
+    else:
+        raise AssertionError("a checksum mismatch must not append a trailer")
 
 
 def test_public_row_and_update_manifest_hide_secrets():
@@ -194,9 +210,11 @@ def test_unset_path_fetches_the_published_exe_and_checks_its_hash():
         assert body == preview.exe
         assert preview.calls == [PREVIEW_SHA_URL, PREVIEW_EXE_URL]
         served, filename = enrollment_download(body, TOKEN)
-        assert served == preview.exe
+        assert served.startswith(preview.exe)
+        assert TOKEN.encode() not in served[:len(preview.exe)]
+        assert setup_token_from_trailer_bytes(served) == TOKEN
         assert filename == f"{SETUP_PREFIX}{TOKEN}.exe"
-        assert TOKEN.encode() not in served
+        assert (Path(cache) / "MyraanaConnector.exe").read_bytes() == preview.exe
 
         preview.calls.clear()
         again = published_connector_package(cache, preview, start + timedelta(minutes=30))
@@ -280,3 +298,76 @@ def test_unset_path_fetches_the_published_exe_and_checks_its_hash():
         lambda: fetch_https("https://user:pass@github.com/faiyaz2139-del/P2GL-Myraana/x.exe"),
         "The connector setup file could not be downloaded.",
     )
+
+
+def test_renamed_filenames_and_setup_diagnostics_keep_the_token_out_of_the_shop():
+    names = [
+        f"{SETUP_PREFIX}{TOKEN} (1).exe",
+        f"{SETUP_PREFIX}{TOKEN} - Copy.exe",
+        f"{SETUP_PREFIX}{TOKEN}.exe.exe",
+        f"{SETUP_PREFIX}{TOKEN} (1).exe.exe",
+        f"{SETUP_PREFIX}{TOKEN} - Copy (2).exe",
+        f"{SETUP_PREFIX}{TOKEN} (1) - Copy.exe",
+        f"myraanaconnector-setup-{TOKEN} (1).EXE",
+    ]
+    for name in names:
+        assert setup_token_from_filename(name) == TOKEN
+    assert setup_token_from_filename("MyraanaConnector.exe") == ""
+    assert setup_token_from_filename(f"{SETUP_PREFIX}{TOKEN} (1).txt") == ""
+    payload = {
+        "host": "P2GL-2",
+        "reason": "This setup file has expired.",
+        "detail": f"password=hunter2 credential=secret token={TOKEN}",
+        "token": TOKEN,
+    }
+    created = "2026-10-24T00:00:00+00:00"
+    used = {"shop_id": "shop-1", "status": "used", "used_at": created, "token_hash": "hash"}
+    stored = prepare_setup_diagnostic(payload, used, 0, created)
+    assert stored["shop_id"] == "shop-1"
+    assert stored["host"] == "P2GL-2"
+    assert stored["reason"] == "This setup file has expired."
+    assert TOKEN not in stored["detail"]
+    assert TOKEN not in stored["reason"]
+    assert "hunter2" not in stored["detail"]
+    assert "secret" not in json_blob(stored)
+    assert "token" not in stored
+    assert "token_hash" not in stored
+    assert prepare_setup_diagnostic(payload, None, 0, created) is None
+    assert prepare_setup_diagnostic(payload, {"shop_id": ""}, 0, created) is None
+    assert prepare_setup_diagnostic(payload, used, DIAGNOSTIC_LIMIT, created) is None
+    expired = {"shop_id": "shop-9", "status": "expired"}
+    assert prepare_setup_diagnostic(payload, expired, 1, created)["shop_id"] == "shop-9"
+    assert public_setup_failure(stored) == {
+        "host": "P2GL-2",
+        "reason": "This setup file has expired.",
+        "created": created,
+    }
+    assert "detail" not in public_setup_failure(stored)
+    server = (ROOT / "backend" / "server.py").read_text(encoding="utf-8")
+    pairing = (ROOT / "backend" / "p2g" / "connector_pairing.py").read_text(encoding="utf-8")
+    app = (ROOT / "frontend" / "src" / "App.js").read_text(encoding="utf-8")
+    tenancy = (ROOT / "backend" / "p2g" / "tenancy.py").read_text(encoding="utf-8")
+    workflow = (ROOT / ".github" / "workflows" / "build-windows-connector.yml").read_text(encoding="utf-8")
+    route = server.split('@api.post("/connector-setup-diagnostics")', 1)[1].split("\n@api.", 1)[0]
+    assert "assert_origin" not in route
+    assert "record_setup_diagnostic" in route
+    assert '"setupFailure": await latest_setup_failure()' in server
+    heartbeat = pairing.split("async def heartbeat", 1)[1].split("\nasync def ", 1)[0]
+    assert "clear_setup_failures()" in heartbeat
+    assert "setup_diagnostics" in tenancy
+    assert 'data-testid="setup-failure-banner"' in app
+    assert "Setup on {failure.host} failed: {failure.reason}" in app
+    assert "Setup on {settings.setupFailure.host} failed: {settings.setupFailure.reason}" in app
+    assert 'data-testid="setup-failure-retry"' in app
+    assert 'data-testid="settings-setup-retry"' in app
+    assert "MyraanaConnector-trailer.exe" in workflow
+    assert "Frozen connector failed after an appended setup trailer" in workflow
+    assert "gh release upload windows-connector-preview $package $checksum $exe $exeChecksum --clobber" in workflow
+    connector = (ROOT / "frontend" / "public" / "setup" / "myraana-connector.py").read_text(encoding="utf-8")
+    assert 'TRAILER_MAGIC = b"MYRAANA1"' in connector
+    main = connector.split("def main", 1)[1]
+    assert main.find("args.self_test") < main.find("setup_token_from_executable")
+
+
+def json_blob(value):
+    return str(value)
