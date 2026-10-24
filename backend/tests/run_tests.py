@@ -11,10 +11,10 @@ def cases(fields, values):
 
 if __name__ == '__main__':
     import unittest
-    import test_account_access, test_agents, test_automatic, test_card_flow, test_catalog_and_products, test_connector_auth, test_connector_enroll, test_costing, test_london_card, test_preflight_cases, test_printer_discovery, test_product_readiness, test_safety, test_shop_admin, test_tenancy
+    import test_account_access, test_agents, test_automatic, test_card_flow, test_catalog_and_products, test_connector_auth, test_connector_enroll, test_costing, test_london_card, test_preflight_cases, test_printer_discovery, test_product_readiness, test_safety, test_shop_admin, test_sign_in, test_tenancy
     class AgentTests(unittest.TestCase):
         pass
-    for module in (test_account_access, test_agents, test_automatic, test_card_flow, test_catalog_and_products, test_connector_auth, test_connector_enroll, test_costing, test_london_card, test_preflight_cases, test_printer_discovery, test_product_readiness, test_safety, test_shop_admin, test_tenancy):
+    for module in (test_account_access, test_agents, test_automatic, test_card_flow, test_catalog_and_products, test_connector_auth, test_connector_enroll, test_costing, test_london_card, test_preflight_cases, test_printer_discovery, test_product_readiness, test_safety, test_shop_admin, test_sign_in, test_tenancy):
         for name, func in vars(module).items():
             if not name.startswith('test_') or not callable(func): continue
             rows = getattr(func, 'test_cases', None)

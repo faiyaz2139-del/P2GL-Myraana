@@ -1,7 +1,25 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { Eye, EyeOff } from "lucide-react";
 import { API, api } from "@/api";
 import "@/site/site.css";
+
+function shopAddress(name) {
+  const slug = String(name || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/g, "");
+  return slug || "shop";
+}
+
+function passwordStrength(password) {
+  const value = String(password || "");
+  if (value.length < 12) return { score: 0, label: "Use at least 12 characters" };
+  let score = 1;
+  if (/[a-z]/.test(value) && /[A-Z]/.test(value)) score += 1;
+  if (/\d/.test(value)) score += 1;
+  if (/[^A-Za-z0-9]/.test(value)) score += 1;
+  if (value.length >= 16) score += 1;
+  const label = score >= 4 ? "Strong password" : score >= 2 ? "Good password" : "Add a number or symbol";
+  return { score: Math.min(score, 4), label };
+}
 
 function SiteHeader({ signedIn }) {
   return <header className="site-header">
@@ -150,6 +168,10 @@ export function Signup() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [signupOpen, setSignupOpen] = useState(false);
+  const [shopName, setShopName] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const strength = passwordStrength(password);
   useEffect(() => {
     api("public/signup-status")
       .then((result) => setSignupOpen(Boolean(result.signupOpen)))
@@ -168,11 +190,14 @@ export function Signup() {
         method: "POST",
         body: JSON.stringify(body),
       });
-      formNode.reset();
       if (result.workspace) {
+        try { sessionStorage.setItem("myraana.offerPasskey", "1"); } catch { /* the offer is optional */ }
         window.location.assign("/jobs");
         return;
       }
+      formNode.reset();
+      setShopName("");
+      setPassword("");
       setMessage(result.message);
     } catch (reason) {
       setError(reason.message);
@@ -185,21 +210,36 @@ export function Signup() {
     <main className="site-form">
       <form className="site-card" onSubmit={submit} data-testid="signup-form">
         <p className="site-kicker">SHOP SIGNUP</p>
-        <h1>{signupOpen ? "Create your shop workspace." : "Request a shop workspace."}</h1>
+        <h1>{signupOpen ? "Create your shop" : "Request your shop"}</h1>
         <p>{signupOpen
-          ? "This creates a private shop, an administrator account, and the business card and flyer presets."
-          : "Myraana saves this request and does not open a shop. Self-serve signup is turned off, so this form does not create a login. There is no password on this form."}</p>
+          ? "You'll be signed in and taken to your jobs. Connect this computer is the next step on that page."
+          : "We'll save this request and email you an invite. A shop login is not created yet."}</p>
         {error && <p className="site-note" role="alert" data-testid="signup-error">{error}</p>}
         {message && <p className="site-ok" data-testid="signup-success">{message}</p>}
-        <label>Shop name<input name="shop" required minLength="2" maxLength="120" data-testid="signup-shop-input" /></label>
-        <div className="site-row">
-          <label>Your name<input name="name" maxLength="80" required={signupOpen} data-testid="signup-name-input" /></label>
-          <label>Email<input name="email" type="email" required data-testid="signup-email-input" /></label>
-        </div>
-        <label>City<input name="city" maxLength="80" data-testid="signup-city-input" /></label>
-        <label>What do you print?<textarea name="message" rows="4" maxLength="2000" data-testid="signup-message-input" /></label>
-        {signupOpen && <label>Password<input name="password" type="password" required minLength="12" maxLength="200" autoComplete="new-password" data-testid="signup-password-input" placeholder="At least 12 characters" /></label>}
-        <button className="site-button solid" disabled={busy} data-testid="signup-submit-button">{busy ? "Saving…" : signupOpen ? "Create shop workspace" : "Request a shop workspace"}</button>
+        <label>Shop name
+          <input name="shop" required minLength="2" maxLength="120" value={shopName} data-testid="signup-shop-input"
+            onChange={(event) => setShopName(event.target.value)} />
+        </label>
+        {shopName.trim().length >= 2 && <p className="site-address" data-testid="signup-address">Your shop address will be {shopAddress(shopName)}.</p>}
+        <label>Your name<input name="name" maxLength="80" required autoComplete="name" data-testid="signup-name-input" /></label>
+        <label>Email<input name="email" type="email" required autoComplete="email" data-testid="signup-email-input" /></label>
+        {signupOpen && <label>Password
+          <span className="password-field">
+            <input name="password" type={showPassword ? "text" : "password"} required minLength="12" maxLength="200"
+              autoComplete="new-password" data-testid="signup-password-input" value={password}
+              onChange={(event) => setPassword(event.target.value)} />
+            <button type="button" className="password-eye" data-testid="signup-password-visibility"
+              aria-label={showPassword ? "Hide password" : "Show password"}
+              onClick={() => setShowPassword((value) => !value)}>
+              {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+            </button>
+          </span>
+          <span className="strength" data-testid="signup-password-strength" data-score={strength.score}>
+            <span style={{ width: `${(strength.score / 4) * 100}%` }} />
+          </span>
+          <span className="strength-label">{strength.label}</span>
+        </label>}
+        <button className="site-button solid" disabled={busy} data-testid="signup-submit-button">{busy ? "Saving…" : signupOpen ? "Create shop" : "Request my shop"}</button>
       </form>
     </main>
     <SiteFooter />

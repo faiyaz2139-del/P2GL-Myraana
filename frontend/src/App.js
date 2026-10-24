@@ -17,6 +17,8 @@ import {
   Play,
   Send,
   Settings2,
+  Eye,
+  EyeOff,
   ShieldCheck,
   Sparkles,
   Sun,
@@ -28,6 +30,7 @@ import "@/App.css";
 import "@/mobile.css";
 import { API, api } from "@/api";
 import { JobModal } from "@/JobForm";
+import { credentialToJSON, creationOptions, passkeySupported, requestOptions } from "@/passkey";
 import { Contact, Home, Legal, NotFound, Signup } from "@/site/Marketing";
 
 const date = (value) => new Date(value).toLocaleString("en-CA", {
@@ -87,6 +90,14 @@ function Badge({ status }) {
   return <span className={`badge ${status.toLowerCase().replaceAll(" ", "-")}`} data-testid={`status-${status.toLowerCase().replaceAll(" ", "-")}`}>{status}</span>;
 }
 
+function rememberedEmail() {
+  try {
+    return localStorage.getItem("myraana.email") || "";
+  } catch {
+    return "";
+  }
+}
+
 function Auth({ auth, onSignedIn }) {
   const [params] = useSearchParams();
   const navigate = useNavigate();
@@ -96,6 +107,22 @@ function Auth({ auth, onSignedIn }) {
   const [notice, setNotice] = useState("");
   const [forgot, setForgot] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [email, setEmail] = useState(rememberedEmail);
+  const [showPassword, setShowPassword] = useState(false);
+  const [shops, setShops] = useState([]);
+  const [ticket, setTicket] = useState("");
+  const [keep, setKeep] = useState(true);
+  const passkeyReady = passkeySupported();
+
+  const finish = async (result) => {
+    try { localStorage.setItem("myraana.email", email); } catch { /* the browser may block storage */ }
+    if (result?.offerPasskey) {
+      try { sessionStorage.setItem("myraana.offerPasskey", "1"); } catch { /* offer is optional */ }
+    }
+    const session = await api("auth");
+    if (!session?.user) throw new Error("Sign in to your shop.");
+    onSignedIn(session.user);
+  };
 
   const submit = async (event) => {
     event.preventDefault();
@@ -113,22 +140,75 @@ function Auth({ auth, onSignedIn }) {
             password: form.get("password"),
           }),
         });
-      } else {
-        await api(`auth/${auth.needsSetup ? "setup" : "login"}`, {
+        const session = await api("auth");
+        if (!session?.user) throw new Error("Sign in to your shop.");
+        onSignedIn(session.user);
+      } else if (auth.needsSetup) {
+        await api("auth/setup", {
           method: "POST",
           body: JSON.stringify({
             name: form.get("name"),
             email: form.get("email"),
             password: form.get("password"),
-            shop: form.get("shop") || "",
           }),
         });
+        const session = await api("auth");
+        if (!session?.user) throw new Error("Sign in to your shop.");
+        onSignedIn(session.user);
+      } else {
+        const result = await api("auth/login", {
+          method: "POST",
+          body: JSON.stringify({
+            email: form.get("email"),
+            password: form.get("password"),
+            keep: form.get("keep") === "on",
+          }),
+        });
+        if (result?.chooseShop) {
+          setShops(result.shops || []);
+          setTicket(result.ticket || "");
+          setKeep(form.get("keep") === "on");
+          return;
+        }
+        await finish(result);
       }
-      const session = await api("auth");
-      if (!session?.user) throw new Error("Sign in to your shop.");
-      onSignedIn(session.user);
     } catch (reason) {
       setError(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const chooseShop = async (shopId) => {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api("auth/login/shop", {
+        method: "POST",
+        body: JSON.stringify({ ticket, shopId, keep }),
+      });
+      await finish(result);
+    } catch (reason) {
+      setError(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const signInWithPasskey = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const options = await api("auth/passkey/login/options", { method: "POST", body: "{}" });
+      const credential = await navigator.credentials.get({ publicKey: requestOptions(options) });
+      if (!credential) throw new Error("The passkey sign-in was cancelled.");
+      const result = await api("auth/passkey/login", {
+        method: "POST",
+        body: JSON.stringify(credentialToJSON(credential)),
+      });
+      await finish(result);
+    } catch (reason) {
+      setError(reason.message || "This passkey could not sign in. Try again.");
     } finally {
       setBusy(false);
     }
@@ -236,29 +316,52 @@ function Auth({ auth, onSignedIn }) {
           Back to sign in
         </button>
       </form>}
-      {!resetToken && !forgot && <form onSubmit={submit} data-testid={invite ? "invite-accept-form" : "auth-form"}>
+      {!resetToken && !forgot && shops.length > 0 && <div data-testid="pick-your-shop">
+        <h2>Pick your shop</h2>
+        <p className="muted">This email is used by more than one shop.</p>
+        <div className="shop-pick">
+          {shops.map((shop) => <button type="button" className="primary wide" key={shop.id} disabled={busy}
+            data-testid="pick-shop-button" onClick={() => chooseShop(shop.id)}>{shop.name}</button>)}
+        </div>
+      </div>}
+      {!resetToken && !forgot && shops.length === 0 && <form onSubmit={submit} data-testid={invite ? "invite-accept-form" : "auth-form"}>
         {(auth.needsSetup || invite) && <label>Your name
           <input name="name" required maxLength="80" autoComplete="name"
             data-testid="setup-name-input" placeholder="Shop administrator" />
         </label>}
         {!invite && <label>Email
-          <input name="email" required type="email" autoComplete="username"
+          <input name="email" required type="email" autoComplete="username" value={email}
+            onChange={(event) => setEmail(event.target.value)}
             data-testid="auth-email-input" placeholder="you@yourshop.ca" />
         </label>}
-        {!invite && !auth.needsSetup && <label>Shop address
-          <input name="shop" maxLength="80" autoComplete="off"
-            data-testid="auth-shop-input" placeholder="Only if this email is used by more than one shop" />
-        </label>}
         <label>Password
-          <input name="password" required type="password" minLength="12" maxLength="200"
-            autoComplete={auth.needsSetup || invite ? "new-password" : "current-password"}
-            data-testid="auth-password-input" placeholder="At least 12 characters" />
+          <span className="password-field">
+            <input name="password" required type={showPassword ? "text" : "password"} maxLength="200"
+              minLength={auth.needsSetup || invite ? 12 : undefined}
+              autoComplete={auth.needsSetup || invite ? "new-password" : "current-password"}
+              data-testid="auth-password-input"
+              placeholder={auth.needsSetup || invite ? "At least 12 characters" : ""} />
+            <button type="button" className="password-eye" data-testid="password-visibility"
+              aria-label={showPassword ? "Hide password" : "Show password"}
+              onClick={() => setShowPassword((value) => !value)}>
+              {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+            </button>
+          </span>
         </label>
+        {!invite && !auth.needsSetup && <label className="keep-signed-in">
+          <input type="checkbox" name="keep" defaultChecked data-testid="keep-signed-in" />
+          Keep me signed in
+        </label>}
         <button className="primary wide" disabled={busy} data-testid="auth-submit-button">
           {busy ? "Saving…" : invite ? "Join shop" : auth.needsSetup ? "Create shop account" : "Sign in"}
         </button>
       </form>}
-      {!invite && !resetToken && !forgot && !auth.needsSetup && <button type="button" className="text-button" data-testid="forgot-password-button" onClick={() => { setForgot(true); setError(""); }}>
+      {!invite && !resetToken && !forgot && !auth.needsSetup && shops.length === 0 && passkeyReady && <button type="button" className="button wide" disabled={busy} data-testid="sign-in-with-passkey" onClick={signInWithPasskey}>
+        Sign in with passkey
+      </button>}
+      {auth.providers?.google && <button type="button" className="button wide" data-testid="google-sign-in">Sign in with Google</button>}
+      {auth.providers?.magicLink && <button type="button" className="button wide" data-testid="magic-link-sign-in">Email me a sign-in code</button>}
+      {!invite && !resetToken && !forgot && !auth.needsSetup && <button type="button" className="text-button" data-testid="forgot-password-button" onClick={() => { setForgot(true); setError(""); setShops([]); }}>
         Forgot password?
       </button>}
       <p className="tiny"><ShieldCheck size={14} />Files and approvals stay in your shop.</p>
@@ -1725,6 +1828,52 @@ async function downloadConnectorSetup() {
   URL.revokeObjectURL(url);
 }
 
+function PasskeyOffer() {
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    try {
+      const offered = sessionStorage.getItem("myraana.offerPasskey") === "1";
+      const dismissed = localStorage.getItem("myraana.passkeyDismissed") === "1";
+      if (offered && !dismissed && passkeySupported()) setOpen(true);
+    } catch { /* storage is optional */ }
+  }, []);
+  if (!open) return null;
+  const dismiss = () => {
+    try {
+      localStorage.setItem("myraana.passkeyDismissed", "1");
+      sessionStorage.removeItem("myraana.offerPasskey");
+    } catch { /* storage is optional */ }
+    setOpen(false);
+  };
+  const setup = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const options = await api("auth/passkey/register/options", { method: "POST", body: "{}" });
+      const credential = await navigator.credentials.create({ publicKey: creationOptions(options) });
+      if (!credential) throw new Error("Passkey setup was cancelled.");
+      await api("auth/passkey/register", { method: "POST", body: JSON.stringify(credentialToJSON(credential)) });
+      try { sessionStorage.removeItem("myraana.offerPasskey"); } catch { /* storage is optional */ }
+      setOpen(false);
+    } catch (reason) {
+      setError(reason.message || "This passkey could not be saved. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <div className="passkey-offer" data-testid="passkey-offer">
+    <div>
+      <strong>Use Windows Hello next time?</strong>
+      <p>One tap signs you in on this computer.</p>
+    </div>
+    <button type="button" className="primary" disabled={busy} data-testid="passkey-setup-button" onClick={setup}>Use Windows Hello</button>
+    <button type="button" className="text-button" data-testid="passkey-dismiss-button" onClick={dismiss}>Not now</button>
+    {error && <p className="notice warning" role="alert">{error}</p>}
+  </div>;
+}
+
 function ConnectComputerBanner({ settings, user, pending, hint, onConnect, onOther }) {
   const state = connectBannerState(settings, user, pending);
   if (!state) return null;
@@ -1882,6 +2031,7 @@ function Studio() {
       </div>
     </header>
     <ConnectComputerBanner settings={settings} user={auth.user} pending={setupHint} hint={setupHint} onConnect={connectThisComputer} onOther={() => navigate("/settings#other-ways")} />
+    <PasskeyOffer />
     {setupError && <div className="error-bar" data-testid="connect-setup-error">{setupError}</div>}
     {error && <div className="error-bar" data-testid="global-error"><AlertTriangle />{error}<button className="icon-button" onClick={() => setError("")} data-testid="dismiss-error-button"><X /></button></div>}
     {view === "jobs" && !job && <main className="jobs-page" data-testid="jobs-page">

@@ -1,6 +1,7 @@
 import hmac
 import json
 import os
+import secrets
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,7 +60,7 @@ from p2g.connector_pairing import (
 )
 from p2g.catalog_seed import SpecError
 from p2g.costing import CostValidationError, cost_profile
-from p2g.core import AppError, db, new_id, now
+from p2g.core import AppError, db, new_id, now, sha256
 from p2g.present import status_label
 from p2g.printer_discovery import normalise_reported, preferred_printer, scan_is_due
 from p2g.printers import filter_printers, is_virtual_printer, printer_status
@@ -95,6 +96,30 @@ from p2g.account_access import (
 )
 from p2g.mail import MailError, public_base, send_email
 from p2g.membership import end_user_sessions
+from p2g.sign_in import (
+    CHOICE_EXPIRED,
+    INVALID_LOGIN,
+    LOCKED_LOGIN,
+    PASSKEY_FAILED,
+    PASSKEY_SAVE_FAILED,
+    PASSKEY_UNAVAILABLE,
+    PasskeyError,
+    begin_passkey,
+    challenge_record,
+    challenge_usable,
+    choice_user,
+    client_challenge,
+    finish_passkey_login,
+    finish_passkey_registration,
+    keep_requested,
+    optional_sign_in_providers,
+    rp_id_from_host,
+    rotation_due,
+    sign_in_decision,
+    sign_in_locked,
+    ticket_is_open,
+    ticket_record,
+)
 from p2g.shops import (
     accept_invite,
     confirm_password_reset,
@@ -114,7 +139,6 @@ from p2g.tenancy import (
     bound_shop,
     clear_shop,
     is_superadmin,
-    login_matches,
     reset_shop,
     shop_scope,
     signup_is_open,
@@ -290,12 +314,64 @@ async def build_info():
     return read_build_metadata()
 
 
+def _passkey_target(request):
+    proto = str(request.headers.get("x-forwarded-proto") or request.url.scheme or "https").split(",")[0].strip()
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    host = str(host or "").split(",")[0].strip()
+    rp_id = rp_id_from_host(host)
+    if proto not in {"https", "http"} or not rp_id:
+        raise AppError(PASSKEY_UNAVAILABLE, 400)
+    return rp_id, f"{proto}://{host}".rstrip("/")
+
+
+async def _rotate_kept_session(request, user):
+    raw = request.cookies.get("p2g_session")
+    if not raw or not user:
+        return None
+    with unscoped():
+        session = await db.sessions.find_one({"token_hash": sha256(raw)})
+    if not rotation_due(session, now()):
+        return None
+    with unscoped():
+        await db.sessions.delete_one({"token_hash": sha256(raw)})
+    cookie, _safe = await issue_session(request, user, keep=True)
+    return cookie
+
+
+async def _offer_passkey(user):
+    if not user or not user.get("shop_id"):
+        return False
+    with shop_scope(user["shop_id"]):
+        found = await db.passkeys.find_one({"user_id": user["id"]}, {"_id": 1})
+    return not found
+
+
+def _session_json(user, cookie, offer=False):
+    body = {"user": user}
+    if offer:
+        body["offerPasskey"] = True
+    response = JSONResponse(body)
+    response.set_cookie(**cookie)
+    return response
+
+
 @api.get("/auth")
 async def auth_status(request: Request):
     user = await current_user(request)
+    cookie = await _rotate_kept_session(request, user)
     with unscoped():
         count = await db.users.count_documents({})
-    return {"user": user, "needsSetup": count == 0}
+    body = {
+        "user": user,
+        "needsSetup": count == 0,
+        "providers": optional_sign_in_providers(os.environ),
+    }
+    if user and user.get("shop_id"):
+        body["passkey"] = not await _offer_passkey(user)
+    response = JSONResponse(body)
+    if cookie:
+        response.set_cookie(**cookie)
+    return response
 
 
 @api.post("/auth/setup")
@@ -333,36 +409,126 @@ async def auth_setup(request: Request):
     return response
 
 
+async def _sign_in_failure_stamps(email):
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+    rows = await db.auth_attempts.find(
+        {"email": email, "purpose": "sign-in", "created": {"$gt": cutoff}},
+    ).to_list(20)
+    return [row.get("created") for row in rows]
+
+
+async def _record_sign_in_failure(email):
+    await db.auth_attempts.insert_one({
+        "_id": new_id(),
+        "email": email,
+        "purpose": "sign-in",
+        "created": now(),
+    })
+
+
+async def _clear_sign_in_failures(email):
+    await db.auth_attempts.delete_many({"email": email, "purpose": "sign-in"})
+
+
+def _password_ok(password, user):
+    encoded = str((user or {}).get("password") or "")
+    if not password or not encoded:
+        return False
+    try:
+        return password_matches(password, encoded)
+    except Exception:
+        return False
+
+
+async def _shops_for(users):
+    shops = {}
+    for user in users or []:
+        shop_id = user.get("shop_id")
+        if not shop_id or shop_id in shops:
+            continue
+        shop = await db.shops.find_one({"_id": shop_id}, {"name": 1, "status": 1})
+        if not shop:
+            shops[shop_id] = {"name": "Shop", "status": "suspended"}
+        else:
+            shops[shop_id] = {"name": shop.get("name") or "Shop", "status": shop.get("status")}
+    return shops
+
+
+async def _finish_password_login(request, user, keep):
+    await _clear_sign_in_failures(str(user.get("email") or "").lower())
+    offer = await _offer_passkey(user)
+    cookie, safe_user = await issue_session(request, user, keep=keep)
+    return _session_json(safe_user, cookie, offer)
+
+
 @api.post("/auth/login")
 async def auth_login(request: Request):
     assert_origin(request)
     payload = await request.json()
-    email = valid_text(payload.get("email"), "Email", 200).lower()
+    email = str(payload.get("email") or "").strip().lower()
     password = str(payload.get("password") or "")
-    shop_slug = str(payload.get("shop") or payload.get("shopSlug") or "").strip().lower()
+    if "@" not in email or " " in email or not password:
+        raise AppError("Enter your email and password.", 400)
+    if len(email) > 200 or len(password) > 200:
+        raise AppError(INVALID_LOGIN, 401)
+    keep = keep_requested(payload.get("keep") if "keep" in payload else True)
     with unscoped():
+        if sign_in_locked(await _sign_in_failure_stamps(email), now()):
+            raise AppError(LOCKED_LOGIN, 429)
         found = await db.users.find({"email": email}).to_list(20)
-    shop_id = None
-    if shop_slug:
-        shop = await db.shops.find_one({"slug": shop_slug})
-        shop_id = shop["_id"] if shop else None
-    matches = login_matches(found, shop_id, bool(shop_slug))
-    if len(matches) > 1:
-        raise AppError(
-            "This email is used by more than one shop. Enter the shop address.",
-            400,
-        )
-    user = matches[0] if matches else None
-    if not user or not password_matches(password, user["password"]):
-        raise AppError("Email or password is incorrect.", 401)
-    if user.get("shop_id"):
-        shop = await db.shops.find_one({"_id": user["shop_id"]}, {"status": 1})
-        if not shop or not shop_allows_sign_in(shop.get("status")):
+        matching = [user["id"] for user in found if _password_ok(password, user)]
+        shops = await _shops_for(found)
+        decision = sign_in_decision(found, shops, matching)
+        if decision["kind"] == "invalid":
+            await _record_sign_in_failure(email)
+            raise AppError(INVALID_LOGIN, 401)
+        if decision["kind"] == "suspended":
             raise AppError(SUSPENDED_MESSAGE, 403)
-    cookie, safe_user = await issue_session(request, user)
-    response = JSONResponse({"user": safe_user})
+        if decision["kind"] == "choose":
+            token = secrets.token_urlsafe(32)
+            record = ticket_record(decision["user_ids"], keep, now())
+            record.update({"_id": new_id(), "token_hash": sha256(token), "email": email})
+            await db.login_tickets.insert_one(record)
+            return {"chooseShop": True, "shops": decision["shops"], "ticket": token}
+        user = decision["user"]
+    await _clear_sign_in_failures(email)
+    offer = await _offer_passkey(user)
+    if keep:
+        cookie, safe_user = await issue_session(request, user)
+    else:
+        cookie, safe_user = await issue_session(request, user, keep=False)
+    response = JSONResponse({"user": safe_user, **({"offerPasskey": True} if offer else {})})
     response.set_cookie(**cookie)
     return response
+
+
+@api.post("/auth/login/shop")
+async def auth_login_shop(request: Request):
+    """Finish sign-in after the password matched more than one shop."""
+    assert_origin(request)
+    payload = await request.json()
+    token = str(payload.get("ticket") or "")
+    choice = str(payload.get("shopId") or payload.get("id") or "")
+    if not token or not choice:
+        raise AppError(CHOICE_EXPIRED, 401)
+    with unscoped():
+        ticket = await db.login_tickets.find_one({"token_hash": sha256(token)})
+        if not ticket_is_open(ticket, now()):
+            raise AppError(CHOICE_EXPIRED, 401)
+        found = await db.users.find({"id": {"$in": list(ticket.get("user_ids") or [])}}).to_list(20)
+        user = choice_user(ticket, choice, found)
+        if not user:
+            raise AppError(CHOICE_EXPIRED, 401)
+        await db.login_tickets.update_one({"_id": ticket["_id"]}, {"$set": {"used": True}})
+        shops = await _shops_for([user])
+        decision = sign_in_decision([user], shops, [user["id"]])
+    if decision["kind"] == "suspended":
+        raise AppError(SUSPENDED_MESSAGE, 403)
+    if decision["kind"] != "session":
+        raise AppError(CHOICE_EXPIRED, 401)
+    return await _finish_password_login(request, decision["user"], bool(ticket.get("keep", True)))
 
 
 @api.post("/auth/logout")
@@ -377,6 +543,125 @@ async def auth_logout(request: Request):
     response = JSONResponse({"ok": True})
     response.delete_cookie("p2g_session", path="/")
     return response
+
+
+async def _store_passkey_challenge(purpose, challenge, user_id="", shop_id=""):
+    record = challenge_record(purpose, challenge, now(), user_id=user_id, shop_id=shop_id)
+    record["_id"] = new_id()
+    await db.passkey_challenges.insert_one(record)
+    return record
+
+
+async def _consume_challenge(payload, purpose, user_id=""):
+    challenge = client_challenge(payload)
+    failure = PASSKEY_FAILED if purpose == "login" else PASSKEY_SAVE_FAILED
+    if not challenge:
+        raise AppError(failure, 401)
+    with unscoped():
+        record = await db.passkey_challenges.find_one({"challenge": challenge, "purpose": purpose})
+        if not challenge_usable(record, purpose, now(), user_id):
+            raise AppError(failure, 401)
+        await db.passkey_challenges.update_one({"_id": record["_id"]}, {"$set": {"used": True}})
+    return record
+
+
+@api.post("/auth/passkey/register/options")
+async def passkey_register_options(request: Request):
+    assert_origin(request)
+    user = require_user(await current_user(request))
+    rp_id, _origin = _passkey_target(request)
+    with shop_scope(user["shop_id"]):
+        rows = await db.passkeys.find({"user_id": user["id"]}, {"credential_id": 1}).to_list(20)
+    try:
+        options, challenge = begin_passkey(
+            "register",
+            rp_id,
+            user_id=user["id"],
+            user_name=user.get("email") or "",
+            display_name=user.get("name") or "",
+            exclude_ids=[row.get("credential_id") for row in rows],
+        )
+    except PasskeyError as error:
+        raise AppError(error.message, 400) from error
+    await _store_passkey_challenge("register", challenge, user["id"], user["shop_id"])
+    return options
+
+
+@api.post("/auth/passkey/register")
+async def passkey_register(request: Request):
+    assert_origin(request)
+    user = require_user(await current_user(request))
+    payload = await request.json()
+    rp_id, origin = _passkey_target(request)
+    record = await _consume_challenge(payload, "register", user["id"])
+    try:
+        verified = finish_passkey_registration(
+            payload, challenge=record["challenge"], rp_id=rp_id, origin=origin,
+        )
+    except PasskeyError as error:
+        raise AppError(error.message, 400) from error
+    with shop_scope(user["shop_id"]):
+        await db.passkeys.insert_one({
+            "_id": new_id(),
+            "user_id": user["id"],
+            "credential_id": verified["credential_id"],
+            "public_key": verified["public_key"],
+            "sign_count": verified["sign_count"],
+            "created": now(),
+        })
+    return {"ok": True}
+
+
+@api.post("/auth/passkey/login/options")
+async def passkey_login_options(request: Request):
+    assert_origin(request)
+    rp_id, _origin = _passkey_target(request)
+    try:
+        options, challenge = begin_passkey("login", rp_id)
+    except PasskeyError as error:
+        raise AppError(error.message, 400) from error
+    await _store_passkey_challenge("login", challenge)
+    return options
+
+
+@api.post("/auth/passkey/login")
+async def passkey_login(request: Request):
+    assert_origin(request)
+    payload = await request.json()
+    rp_id, origin = _passkey_target(request)
+    credential_id = str(payload.get("id") or "")
+    record = await _consume_challenge(payload, "login")
+    with unscoped():
+        stored = await db.passkeys.find_one({"credential_id": credential_id})
+    if not stored or not stored.get("shop_id"):
+        raise AppError(PASSKEY_FAILED, 401)
+    try:
+        verified = finish_passkey_login(
+            payload,
+            challenge=record["challenge"],
+            rp_id=rp_id,
+            origin=origin,
+            public_key=stored.get("public_key") or "",
+            sign_count=stored.get("sign_count") or 0,
+        )
+    except PasskeyError as error:
+        raise AppError(error.message, 401) from error
+    with shop_scope(stored["shop_id"]):
+        updated = await db.passkeys.update_one(
+            {"credential_id": credential_id, "sign_count": stored.get("sign_count") or 0},
+            {"$set": {"sign_count": verified["sign_count"]}},
+        )
+    if getattr(updated, "matched_count", 0) == 0:
+        raise AppError(PASSKEY_FAILED, 401)
+    with unscoped():
+        user = await db.users.find_one({"id": stored["user_id"]}, {"_id": 0, "password": 0})
+        shop = await db.shops.find_one({"_id": stored["shop_id"]}, {"status": 1})
+    if not user or user.get("active") is False:
+        raise AppError(PASSKEY_FAILED, 401)
+    if not shop or not shop_allows_sign_in(shop.get("status")):
+        raise AppError(SUSPENDED_MESSAGE, 403)
+    cookie, safe_user = await issue_session(request, user, keep=True)
+    return _session_json(safe_user, cookie, offer=False)
 
 
 @api.get("/products")
@@ -405,6 +690,8 @@ async def public_signup(request: Request):
     payload = await request.json()
     if not signup_is_open():
         payload.pop("password", None)
+        if not str(payload.get("name") or "").strip():
+            raise AppError("Enter your name.", 400)
         await _store_lead(payload, "signup")
         return signup_result()
     password = str(payload.pop("password", "") or "")
@@ -426,6 +713,7 @@ async def public_signup(request: Request):
         "slug": shop["slug"],
         "message": "Your shop workspace is ready.",
         "user": safe_user,
+        "offerPasskey": True,
     })
     response.set_cookie(**cookie)
     return response
