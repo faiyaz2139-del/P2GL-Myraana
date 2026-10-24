@@ -170,6 +170,16 @@ def load_discovery():
     return module
 
 
+def hidden_window_kwargs():
+    """One place for console-free children on Windows. Discovery owns the flags."""
+    try:
+        return load_discovery().hidden_window_kwargs()
+    except Exception:
+        if platform.system() != "Windows":
+            return {}
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+
+
 def printers():
     """Windows spooler queues. Get-Printer and Bonjour run in discover_printers."""
     if platform.system() != "Windows":
@@ -576,13 +586,13 @@ def stop_other_connectors():
     """
     if platform.system() != "Windows":
         return
-    creation = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     subprocess.run(
         ["taskkill", "/F", "/IM", INSTALL_EXE_NAME],
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        creationflags=creation,
         check=False,
+        **hidden_window_kwargs(),
     )
 
 
@@ -625,6 +635,7 @@ def handoff_setup(source, token, dest=None, spawn=None, stopper=None, replace=No
 
 
 def spawn_detached(argv, env):
+    """Start the installed windowed exe. DETACHED_PROCESS gives it no console at all."""
     kwargs = {"env": env, "close_fds": True}
     if platform.system() == "Windows":
         flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
